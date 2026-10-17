@@ -55,6 +55,8 @@ local OFF = {
     npcTierOffset      = 0x184,
  
     name             = 0x438,
+    -- Local-player armor fields (verified on the LOCAL PLAYER structure only;
+    -- these offsets are meaningless on NPC entity pointers).
     agentarmor       = 0x254,
     agentarmorMax    = 0x258,
     weapPtr0         = 0x718,
@@ -303,19 +305,52 @@ local ALL_BONE_IDS_SPARSE = {
 }
 
 -- Weak-point (backpack / propane / turret battery) entities: in TD2 these are
--- NOT bones of the boss rig. They spawn as separate lightweight entities with
--- entityTypeInt == -1 (ENTITY_TYPE_GADGET), usually with an empty name and
--- archetype Unset(0). The aimbot must target those entity pointers directly;
--- scanning extra bone ids on the boss skeleton finds nothing.
+-- NOT bones of the boss rig. They spawn as separate lightweight entities.
+-- Empirically they show up either as entityTypeInt == -1 (GADGET) or as a
+-- regular NPC-type entity whose descriptor chain cannot be read at all
+-- (archetype == nil -> profile NO_SKELETON) while still owning an HP component
+-- with a sane health value. DestructibleProp(47)/Trap(70)/Hive(71) archetypes
+-- are explicit weak-point props too.
 local WEAK_POINT_BONE_IDS = { 3, 5, 11, 12, 19, 20, 21, 24, 26, 43, 49, 50 }
 
+local WEAK_POINT_NAME_HINTS = {
+    "backpack", "propane", "tank", "gas", "canister", "cylinder",
+    "explosive", "weakpoint", "weak_point", "weak point", "vulnerable",
+    "battery", "reactor", "core", "loader", "ammoload", "fuel",
+}
+
+local WEAK_POINT_ARCHETYPES = {}
+for _, k in ipairs({ "DestructibleProp", "Trap", "Hive" }) do
+    WEAK_POINT_ARCHETYPES[NPC_ARCHETYPE[k]] = true
+end
+
+local function name_looks_like_weak_point(name)
+    if not name or name == "" then return false end
+    local ln = lc(name)
+    for _, hint in ipairs(WEAK_POINT_NAME_HINTS) do
+        if ln:find(hint, 1, true) then return true end
+    end
+    return false
+end
+
 local function is_weak_point_entity(e)
-    if e.is_player then return false end
-    if e.entity_type_int ~= ENTITY_TYPE_GADGET then return false end
-    -- real player gadgets/skills have a known archetype id; backpacks/tanks
-    -- spawned by bosses keep archetype Unset(0) or fail to read (nil)
-    if e.archetype ~= nil and e.archetype ~= NPC_ARCHETYPE.Unset then return false end
-    return true
+    if not e or e.is_player then return false end
+    if e.hp_max <= 0 or e.hp_max > 2000000 then return false end
+    if e.archetype ~= nil and WEAK_POINT_ARCHETYPES[e.archetype] then
+        return true
+    end
+    if name_looks_like_weak_point(e.ent_name) then return true end
+    if e.entity_type_int == ENTITY_TYPE_GADGET then
+        -- player skills/gadgets always resolve to a known archetype id;
+        -- boss props (backpacks/tanks) keep archetype Unset(0) or nil
+        if e.archetype == nil or e.archetype == NPC_ARCHETYPE.Unset then
+            return true
+        end
+    elseif e.archetype == nil then
+        -- NPC-typed entity without a readable descriptor => prop, not an agent
+        return true
+    end
+    return false
 end
  
 local ALL_BONE_IDS_0_90 = {}
@@ -334,6 +369,10 @@ local BATCH_MAX_BYTES   = 4096
 local TRANSITION_FRAMES       = 120
 local MIN_OVERLAP_CHECK_COUNT = 4
 local SILENT_LOCK_DELTA       = 2.0
+-- pixels of "screen distance" bonus for the already-locked weak point, so the
+-- aim keeps holding the same prop until it is destroyed instead of flitting
+-- between several backpacks/tanks that are closer to the crosshair
+local SILENT_WP_STICK_BONUS   = 500.0
  
 local LOCK_ID = {
     silent     = 10001,
@@ -444,6 +483,7 @@ local aim_point_for
 local should_show
  
 local function get_color(e)
+    if is_weak_point_entity(e) then return {255, 200, 0} end
     if e.is_player then
         if e.relation == "hostile" then return {255, 140, 25} end
         return {51, 102, 255}
@@ -1190,8 +1230,16 @@ local function refresh_stats()
     if hp == 0 then error("hp component is NULL") end
     state.hp        = read_uint(hp + OFF.health, 4)
     state.hp_max    = read_uint(hp + OFF.healthMax, 4)
-    state.armor     = read_uint(hp + OFF.agentarmor, 4)
-    state.armor_max = read_uint(hp + OFF.agentarmorMax, 4)
+    -- armor lives at +0x254/+0x258 of the LOCAL PLAYER structure (not of the
+    -- HP component and not on NPC entities); validate the range so a stale
+    -- offset can never show garbage like "Armor: 3e9" again.
+    local ar     = read_uint(lp + OFF.agentarmor, 4)
+    local ar_max = read_uint(lp + OFF.agentarmorMax, 4)
+    if ar < 0 or ar > 100000 or ar_max <= 0 or ar_max > 1000000 then
+        ar, ar_max = 0, 0
+    end
+    state.armor     = ar
+    state.armor_max = ar_max
 end
  
 local function apply_recoil()
@@ -1267,6 +1315,10 @@ local function magic_bullet_should_enable()
     if not state.silent_target_ptr then return false end
     for _, e in ipairs(state.entities) do
         if e.entity_ptr == state.silent_target_ptr then
+            -- weak points are gadget props with their own HP pool: the
+            -- ray-correcting flag works on them too and is REQUIRED to deal
+            -- any damage at all (a normal bullet often can't hit a small prop
+            -- where the aim vector says it should).
             return is_silent_target(e)
         end
     end
@@ -1720,10 +1772,11 @@ local function get_bone_ids_for_entity(e, read_all)
         return ALL_BONE_IDS_0_90
     end
 
-    -- boss backpacks / propane tanks are separate gadget entities and have no
-    -- skeleton; aiming falls back to their entity position (see aim_point_for)
+    -- boss backpacks / propane tanks are separate prop entities without a
+    -- meaningful skeleton; skip bone reads entirely (aiming uses the entity
+    -- position, see aim_point_for)
     if is_weak_point_entity(e) then
-        return WEAK_POINT_BONE_IDS
+        return {}
     end
  
     local pname = profile_name_for(e)
@@ -1988,7 +2041,15 @@ end
  
 local function aim_point_for(e)
     if not e then return nil end
- 
+
+    -- weak-point props have no usable skeleton: always aim at the entity
+    -- position itself (this is the prop's world center, where its HP
+    -- component takes hits). Never route them through the humanoid profile,
+    -- which would fall back to "head + 1.2m" above an object that has no head.
+    if is_weak_point_entity(e) then
+        return { e.pos[1], e.pos[2], e.pos[3] }
+    end
+
     local pname = profile_name_for(e)
  
     if pname == "DRONE" or pname == "TURRET" or pname == "ITEM" then
@@ -2057,11 +2118,13 @@ local function find_silent_target(entities, viewproj, wr)
     local w = wr[1]
     if not w or not w.width or w.width <= 0 then return nil end
     local cx, cy = w.x + w.width / 2, w.y + w.height / 2
- 
+
     -- two-stage target selection: collect weak-point candidates and regular
     -- NPC candidates separately; switch to head/body targets only once no
     -- alive weak point is left inside the FOV (destroyed props disappear from
-    -- the entity list on their own, so re-checking each frame is enough)
+    -- the entity list on their own, so re-checking each frame is enough).
+    -- A live lock on a weak point gets a stickiness bonus so the aim keeps
+    -- holding the SAME prop until its HP reaches 0 / it despawns.
     local best_wp, best_wp_score = nil, -math.huge
     local best_np, best_np_score = nil, -math.huge
     for _, e in ipairs(entities) do
@@ -2075,6 +2138,11 @@ local function find_silent_target(entities, viewproj, wr)
                     if dist_px < state.silent_fov then
                         local score = -dist_px
                         if state.weak_points_first and is_weak_point_entity(e) then
+                            if state.silent_target_ptr
+                               and e.entity_ptr == state.silent_target_ptr
+                               and e.hp > 0 then
+                                score = score + SILENT_WP_STICK_BONUS
+                            end
                             if score > best_wp_score then
                                 best_wp_score, best_wp = score, e
                             end
@@ -2241,8 +2309,10 @@ local function silent_tick(pid, base)
  
         if state.magic_bullet then
             local on = false
-            if state.silent_armed and state.silent_target_ptr and target
-               and not is_weak_point_entity(target) then
+            if state.silent_armed and state.silent_target_ptr and target then
+                -- magic bullet must stay ON for weak points as well: props are
+                -- tiny raycast targets, without the correction bullets aimed
+                -- at them simply pass through and deal zero damage.
                 on = is_silent_target(target)
             end
             write_uint(base + RVA.magicbullet,
@@ -2984,6 +3054,8 @@ end
                                 or pname == "MINITANK"
                                 or pname == "BIG_DOG" or pname == "WARHOUND_GRENADIER"
                                 or pname == "WARHOUND_MINIGUN"
+                            local is_wp = is_weak_point_entity(e)
+                            if is_wp then is_summon_box = true end
                             local draw_box = state.esp_boxes
                                 and ( is_summon_box
                                       or not state.esp_bones
@@ -3054,7 +3126,13 @@ end
  
                             if state.esp_type and e.ent_type then
                                 local tlabel = e.ent_type
-                                if e.archetype_name then
+                                if is_wp then
+                                    tlabel = string.format(
+                                        "WEAKPOINT hp %d/%d Ty%d A%s",
+                                        e.hp or 0, e.hp_max or 0,
+                                        e.entity_type_int or 0,
+                                        tostring(e.archetype))
+                                elseif e.archetype_name then
                                     tlabel = tlabel .. ":" .. e.archetype_name
                                 end
                                 local yoff = state.esp_name and -24 or -12
