@@ -302,9 +302,21 @@ local ALL_BONE_IDS_SPARSE = {
     78, 79, 80, 83, 84, 86, 87, 88, 91, 92,
 }
 
--- Weak-point (backpack / propane / turret battery) bones that are NOT part of
--- the standard rig. Read additionally when "weak points first" is enabled.
+-- Weak-point (backpack / propane / turret battery) entities: in TD2 these are
+-- NOT bones of the boss rig. They spawn as separate lightweight entities with
+-- entityTypeInt == -1 (ENTITY_TYPE_GADGET), usually with an empty name and
+-- archetype Unset(0). The aimbot must target those entity pointers directly;
+-- scanning extra bone ids on the boss skeleton finds nothing.
 local WEAK_POINT_BONE_IDS = { 3, 5, 11, 12, 19, 20, 21, 24, 26, 43, 49, 50 }
+
+local function is_weak_point_entity(e)
+    if e.is_player then return false end
+    if e.entity_type_int ~= ENTITY_TYPE_GADGET then return false end
+    -- real player gadgets/skills have a known archetype id; backpacks/tanks
+    -- spawned by bosses keep archetype Unset(0) or fail to read (nil)
+    if e.archetype ~= nil and e.archetype ~= NPC_ARCHETYPE.Unset then return false end
+    return true
+end
  
 local ALL_BONE_IDS_0_90 = {}
 for i = 0, 90 do ALL_BONE_IDS_0_90[#ALL_BONE_IDS_0_90 + 1] = i end
@@ -443,13 +455,24 @@ local function get_color(e)
     return {180, 80, 255}
 end
  
+-- Kept for diagnostics/back-compat; the actual two-stage selection happens
+-- inside find_silent_target (weak points vs. regular targets are collected
+-- separately and never mixed into one score).
 local function aimbot_priority(e)
-    if e.entity_type == ENTITY_TYPE_GADGET then return 1 end
-    return 3
+    if is_weak_point_entity(e) then return 2 end
+    if e.entity_type_int == ENTITY_TYPE_GADGET then return 1 end
+    return 0
 end
  
 local function is_silent_target(e)
     if not e or e.is_player or e.is_downed then return false end
+
+    -- weak-point props: lightweight gadget entities. They classify as
+    -- "friendly" via the normal pipeline, so they must bypass relation /
+    -- archetype filtering here, otherwise the aimbot never sees them.
+    if is_weak_point_entity(e) then
+        return state.weak_points_first
+    end
     if e.is_summoned and not state.silent_target_summon then return false end
     if e.entity_type ~= ENTITY_TYPE_NPC then return false end
  
@@ -537,6 +560,7 @@ state = {
  
     aim_part        = "head",
     target_gadgets  = true,
+    weak_points_first = true,
  
     silent_enabled       = false,
     silent_target_summon = true,
@@ -630,7 +654,7 @@ local PERSIST_KEYS = {
     "esp_show_faction", "esp_desc_test", "esp_max_dist", "esp_show_silent_fov",
     "silent_enabled", "silent_target_summon", "silent_fov",
     "silent_max_dist", "aim_part",
-    "target_gadgets",
+    "target_gadgets", "weak_points_first",
     "no_recoil", "no_spread", "magic_bullet", "no_sway", "move_speed",
     "extended_range", "instant_reload",
     "accuracy_locked", "fast_fire", "high_headshot_dmg", "headshot_dmg_multiplier",
@@ -1695,6 +1719,12 @@ local function get_bone_ids_for_entity(e, read_all)
     if read_all then
         return ALL_BONE_IDS_0_90
     end
+
+    -- boss backpacks / propane tanks are separate gadget entities and have no
+    -- skeleton; aiming falls back to their entity position (see aim_point_for)
+    if is_weak_point_entity(e) then
+        return WEAK_POINT_BONE_IDS
+    end
  
     local pname = profile_name_for(e)
     if pname == "DRONE" then return {} end
@@ -1819,6 +1849,11 @@ local function should_show(e)
  
     if pname == "ITEM" then
         return false
+    end
+
+    -- show weak-point props in ESP so the user can verify silent aim sees them
+    if is_weak_point_entity(e) then
+        return state.esp_show_other or state.weak_points_first
     end
  
     if pname ~= "TURRET"
@@ -2023,7 +2058,12 @@ local function find_silent_target(entities, viewproj, wr)
     if not w or not w.width or w.width <= 0 then return nil end
     local cx, cy = w.x + w.width / 2, w.y + w.height / 2
  
-    local best, best_score = nil, -math.huge
+    -- two-stage target selection: collect weak-point candidates and regular
+    -- NPC candidates separately; switch to head/body targets only once no
+    -- alive weak point is left inside the FOV (destroyed props disappear from
+    -- the entity list on their own, so re-checking each frame is enough)
+    local best_wp, best_wp_score = nil, -math.huge
+    local best_np, best_np_score = nil, -math.huge
     for _, e in ipairs(entities) do
         if not e.is_player and is_silent_target(e) and e.dist <= state.silent_max_dist then
             local tp = aim_point_for(e)
@@ -2033,18 +2073,23 @@ local function find_silent_target(entities, viewproj, wr)
                     local dx, dy = sx - cx, sy - cy
                     local dist_px = math.sqrt(dx * dx + dy * dy)
                     if dist_px < state.silent_fov then
-                        local prio = aimbot_priority(e)
-                        local score = prio * 10000 - dist_px
-                        if score > best_score then
-                            best_score = score
-                            best = e
+                        local score = -dist_px
+                        if state.weak_points_first and is_weak_point_entity(e) then
+                            if score > best_wp_score then
+                                best_wp_score, best_wp = score, e
+                            end
+                        else
+                            if score > best_np_score then
+                                best_np_score, best_np = score, e
+                            end
                         end
                     end
                 end
             end
         end
     end
-    return best
+    if best_wp then return best_wp end
+    return best_np
 end
  
 local function pack_vec3(v)
@@ -2131,6 +2176,8 @@ local function silent_tick(pid, base)
  
             local tp = aim_point_for(target)
             if tp then
+                state.silent_target_kind = is_weak_point_entity(target)
+                    and "weak point" or "npc"
                 local aim_addr = aim + OFF.worldAimPos
                 local aim_bytes = pack_vec3(tp)
  
@@ -2151,7 +2198,15 @@ local function silent_tick(pid, base)
  
                 state.diag_last_write = { tp[1], tp[2], tp[3] }
                 state.silent_armed = true
-                state.silent_target_name = string.format("%s %.0fm", state.aim_part, target.dist)
+                if is_weak_point_entity(target) then
+                    state.silent_target_name = string.format(
+                        "WEAK POINT (%s) %.0fm",
+                        (target.ent_name ~= "" and target.ent_name or "prop"),
+                        target.dist)
+                else
+                    state.silent_target_name = string.format(
+                        "%s %.0fm", state.aim_part, target.dist)
+                end
             end
         else
             release_silent_lock(pid)
@@ -2186,7 +2241,8 @@ local function silent_tick(pid, base)
  
         if state.magic_bullet then
             local on = false
-            if state.silent_armed and state.silent_target_ptr and target then
+            if state.silent_armed and state.silent_target_ptr and target
+               and not is_weak_point_entity(target) then
                 on = is_silent_target(target)
             end
             write_uint(base + RVA.magicbullet,
@@ -3100,6 +3156,7 @@ end
             { "ESP",            state.esp_enabled },
             { "Silent aim",     state.silent_enabled },
             { "Target gadgets", state.target_gadgets },
+            { "Weak points first", state.weak_points_first },
             { "No recoil",      state.no_recoil },
             { "No spread",      state.no_spread },
             { "Magic bullet",   state.magic_bullet },
@@ -3195,6 +3252,8 @@ end
                 if checkbox_edge("Pelvis", state.aim_part == "pelvis") then state.aim_part = "pelvis" end
                 ui.small("Current: " .. state.aim_part)
                 ui.small("(humanoid rigs honor this; vehicles use profile aim bone)")
+                chk("Weak points first (backpacks/tanks)", "weak_points_first")
+                ui.small("Silent aim shoots boss backpacks/propane tanks before switching to the head")
  
                 ui.separator()
                 state.silent_fov = select(1, ui.slider_f32("FOV", state.silent_fov, 10, 800))
