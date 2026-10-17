@@ -391,44 +391,65 @@ end
 
 -- The entity position in TD2 is the object's ORIGIN, which for many props is
 -- at their FEET (e.g. a propane "tank" prop whose origin sits on the ground
--- under it). Silent aim must write the actual damage volume center instead:
---   * tall props (fuel tanks / generators / consoles): raise the aim point to
---     ~55% of the box height, clamped to [0.4m .. 1.4m] above the origin;
---   * when the prop has an HP component that reports armor/shield remaining,
---     the shootable layer is the armor volume - aim slightly higher (+0.35m);
---   * flat/small props (backpacks on the boss, low barrels): keep the raw
---     origin, since their hitbox is centered there.
--- Aiming at the feet was exactly why the "tank" weak point looked like it was
--- placed in the NPC's legs.
-local WEAK_POINT_NAME_HINTS_TALL = {
-    "tank", "generator", "console", "transformer", "pylon", "junction",
-    "battery", "reactor", "barrel", "canister", "cylinder", "propane",
-    "valve", "vent",
+-- under it). Silent aim must write the actual damage volume center instead.
+--
+-- IMPORTANT: hp_max is HIT POINTS, not physical meters — the previous version
+-- treated it as a box height ("lift = 0.55 * hp_max"), which produced garbage
+-- offsets (a 900-HP tank got clamped to the max, a 3-HP prop got the min) and
+-- aimed at random spots near the ground / NPC legs. Now the vertical lift is
+-- derived ONLY from the prop kind (name keywords), with fixed sane ranges:
+--   * floor-standing cylinders/tanks/generators: body center ~0.7 m up;
+--   * wall/console/pylon objects: ~1.0 m;
+--   * vehicles: ~0.8 m;
+--   * small carried props (backpacks are usually read at torso height): no
+--     lift unless clearly a ground prop;
+--   * unknown props: default 0.5 m (origin of most gadgets is already the
+--     volume center, so a small lift is safe).
+-- state.wp_aim_lift is a user-adjustable multiplier (UI slider, default 1.0)
+-- so the exact height can be calibrated in-game via the yellow crosshair
+-- marker without editing the script.
+local WP_LIFT_TABLE = {
+    -- { min = lower bound of lift, max = upper bound, def = default lift }
+    CYLINDER = { min = 0.20, max = 1.60, def = 0.70 }, -- tank/barrel/canister/propane
+    WALL     = { min = 0.20, max = 2.20, def = 1.00 }, -- generator/console/reactor/pylon
+    VEHICLE  = { min = 0.20, max = 1.80, def = 0.80 }, -- car/truck/van
+    SMALL    = { min = 0.00, max = 0.60, def = 0.00 }, -- backpack/medkit/ammo (torso pos)
+    DEFAULT  = { min = 0.00, max = 1.50, def = 0.50 },
 }
 
-local function weak_point_aim_offset(e)
-    local dy = 0.0
-    local name = e.ent_name
-    if name and name ~= "" then
-        local ln = lc(name)
-        for _, hint in ipairs(WEAK_POINT_NAME_HINTS_TALL) do
-            if ln:find(hint, 1, true) then
-                local h = tonumber(e.hp_max) or 0
-                local lift = 0.55
-                if h >= 100000 then lift = 0.45 end   -- huge boxes: mid-low
-                if h <= 100    then lift = 0.70 end   -- tiny boxes: upper half
-                dy = lift * h
-                if dy < 0.40 then dy = 0.40 end
-                if dy > 1.40 then dy = 1.40 end
-                break
-            end
+local WP_LIFT_KEYWORDS = {
+    { kind = "CYLINDER", keys = { "tank", "barrel", "canister", "cylinder",
+        "propane", "gas", "acetylene", "oxygen", "flam", "fuel", "valve" } },
+    { kind = "WALL", keys = { "generator", "console", "transformer", "pylon",
+        "junction", "battery", "reactor", "power", "vent", "switch", "panel" } },
+    { kind = "VEHICLE", keys = { "car", "truck", "van", "sedan", "suv",
+        "vehicle", "bus" } },
+    { kind = "SMALL", keys = { "backpack", "med", "heal", "support", "supply",
+        "ammo", "loader", "purifier" } },
+}
+
+local function weak_point_lift_kind(name)
+    if not name or name == "" then return "DEFAULT" end
+    local ln = lc(name)
+    for _, grp in ipairs(WP_LIFT_KEYWORDS) do
+        for _, k in ipairs(grp.keys) do
+            if ln:find(k, 1, true) then return grp.kind end
         end
     end
-    -- armored props: the armor layer is the outer, currently-damageable
-    -- volume; nudge the ray toward its upper part so hits actually register
-    if (tonumber(e.wp_armor) or 0) > 0 then
-        dy = math.min(dy + 0.35, 1.6)
-    end
+    return "DEFAULT"
+end
+
+local function weak_point_aim_offset(e)
+    local kind = weak_point_lift_kind(e.ent_name)
+    local cfg = WP_LIFT_TABLE[kind] or WP_LIFT_TABLE.DEFAULT
+    local base = cfg.def
+    -- carried/healing props sit ON the boss: the entity origin of a backpack
+    -- is typically already at torso height -> never lift those blindly
+    if kind == "SMALL" then base = 0.0 end
+    local mult = tonumber(state.wp_aim_lift) or 1.0
+    local dy = base * mult
+    if dy < cfg.min then dy = cfg.min end
+    if dy > cfg.max then dy = cfg.max end
     return dy
 end
 
@@ -765,6 +786,7 @@ state = {
     aim_part        = "head",
     target_gadgets  = true,
     weak_points_first = true,
+    wp_aim_lift     = 1.0,   -- multiplier for weak-point vertical aim lift (m)
  
     silent_enabled       = false,
     silent_target_summon = true,
@@ -872,7 +894,7 @@ local PERSIST_KEYS = {
     "esp_show_faction", "esp_desc_test", "esp_max_dist", "esp_show_silent_fov",
     "silent_enabled", "silent_target_summon", "silent_fov",
     "silent_max_dist", "aim_part",
-    "target_gadgets", "weak_points_first",
+    "target_gadgets", "weak_points_first", "wp_aim_lift",
     "no_recoil", "no_spread", "magic_bullet", "no_sway", "move_speed",
     "extended_range", "instant_reload",
     "accuracy_locked", "fast_fire", "high_headshot_dmg", "headshot_dmg_multiplier",
@@ -3715,6 +3737,9 @@ end
                 ui.small("(humanoid rigs honor this; vehicles use profile aim bone)")
                 chk("Weak points first (backpacks/tanks)", "weak_points_first")
                 ui.small("Silent aim shoots boss backpacks/propane tanks before switching to the head")
+                state.wp_aim_lift = select(1, ui.slider_f32("Weak point aim lift x", state.wp_aim_lift, 0.0, 3.0))
+                ui.small(string.format("Vertical lift of prop aim point (%.2fx; tank ~%.1fm, generator ~%.1fm above origin)",
+                    state.wp_aim_lift, 0.70 * state.wp_aim_lift, 1.00 * state.wp_aim_lift))
  
                 ui.separator()
                 state.silent_fov = select(1, ui.slider_f32("FOV", state.silent_fov, 10, 800))
