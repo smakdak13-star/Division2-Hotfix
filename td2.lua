@@ -331,13 +331,32 @@ local ALL_BONE_IDS_SPARSE = {
 --      but DOES own a valid HP component with hp_max in a sane range. This
 --      catches props even when entityTypeInt@0xC00 reads as garbage/0, which
 --      is why weak points previously were never found.
+-- IMPORTANT: the keywords below are matched as LOWERCASE SUBSTRINGS against
+-- the entity name.  That is why short/ambiguous fragments like "gas", "tank",
+-- "med", "ammo", "car" used to misfire constantly: an NPC named e.g.
+-- "StaticTurretBase" contains "turret"... but worse, ANY prop whose name
+-- merely CONTAINS one of those fragments (or a humanoid enemy archetype that
+-- shares the fragment) got classified as a weak point and the aim wrote the
+-- crosshair onto its feet.  Every keyword is now either a full distinctive
+-- word or an unambiguous compound; matching additionally requires the hit to
+-- be a WORD BOUNDARY start (see wp_name_has_keyword) so "tanker"/"target" no
+-- longer match "tank".
 local WEAK_POINT_NAME_HINTS = {
-    "backpack", "propane", "tank", "gas", "canister", "cylinder",
+    "backpack", "propane", "canister", "cylinder",
     "explosive", "weakpoint", "weak_point", "weak point", "vulnerable",
-    "battery", "reactor", "core", "loader", "ammoload", "fuel",
-    "barrel", "oxygen", "acetylene", "valve", "vent", "console",
-    "generator", "junction", "transformer", "pylon", "charge",
+    "battery", "reactor", "fuel",
+    "barrel", "oxygen", "acetylene", "valve",
+    "generator", "transformer", "pylon", "charge",
+    -- removed ambiguous fragments: "gas" (matches "gasmask"), "tank"
+    -- (matches "tanker"), "med" (matches "medium"), "ammo" alone is kept
+    -- only as "ammoload"/"ammo_" compounds below, "car" (matches "cargo"),
+    -- "core" (matches "score"/"arcade"), "vent", "console", "junction",
+    -- "support", "supply", "loader", "purifier", "heal" -> see tiers
 }
+for _, extra in ipairs({ "ammoload", "ammo_crate", "fuel tank", "fueltank",
+                         "gas can", "gascan", "propane tank" }) do
+    WEAK_POINT_NAME_HINTS[#WEAK_POINT_NAME_HINTS + 1] = extra
+end
 
 local WEAK_POINT_ARCHETYPES = {}
 for _, k in ipairs({ "DestructibleProp", "Trap", "Hive" }) do
@@ -361,28 +380,53 @@ end
 local WEAK_POINT_KEYWORD_TIERS = {
     -- tier A: heals/shields the boss -> kill FIRST
     { tier = 1, label = "HEALER",
-      keys = { "backpack", "purifier", "med", "heal", "support", "dronebay",
-               "supply", "ammoload", "loader", "ammo" } },
+      keys = { "backpack", "purifier", "medkit", "med_bag", "heal",
+               "dronebay", "supply", "ammoload", "ammo_crate" } },
     -- tier B: big damage source (flamethrower tank, exo pack, generator)
     { tier = 2, label = "FUEL",
-      keys = { "flam", "fuel", "propane", "gas", "tank", "canister",
-               "cylinder", "acetylene", "oxygen", "valve", "barrel",
-               "generator", "reactor", "battery", "power", "transformer",
-               "junction", "pylon", "console", "vent" } },
+      keys = { "flamethrower", "fuel", "propane", "gascan", "gas_can",
+               "canister", "cylinder", "acetylene", "oxygen", "barrel",
+               "tank", "generator", "reactor", "battery", "transformer" } },
     -- tier C: anything else explicitly destructible/explosive
     { tier = 3, label = "EXPLOSIVE",
       keys = { "explosive", "weakpoint", "weak_point", "weak point",
-               "vulnerable", "charge", "core", "hive", "trap" } },
+               "vulnerable", "charge", "hive", "trap" } },
 }
+
+-- Word-boundary keyword matcher.  ln:find(k, 1, true) matches ANYWHERE inside
+-- a word, which is why "tank" used to hit names like "TankerNPC" /
+-- "StaticTurret..." style props and the aim locked onto random objects near
+-- NPC feet.  Here a keyword only counts when it starts at a non-alphanumeric
+-- boundary (start of name, after _, space, or any punctuation) AND ends at a
+-- non-alphanumeric boundary too ("tank" hits "boss_tank_01" but not "tanker").
+local function wp_name_has_keyword(ln, k)
+    local from = 1
+    while true do
+        local s, e = ln:find(k, from, true)
+        if not s then return false end
+        local before = (s == 1) and "" or ln:sub(s - 1, s - 1)
+        local after  = (e == #ln) and "" or ln:sub(e + 1, e + 1)
+        local ok_l = (before == "") or not before:match("%w")
+        local ok_r = (after == "")  or not after:match("%w")
+        -- allow '_' as a separator on both sides (snake_case entity names)
+        if before ~= "_" and before:match("%w") then ok_l = false end
+        if after ~= "_" and after:match("%w") then ok_r = false end
+        if ok_l and ok_r then return true end
+        from = s + 1
+    end
+end
 
 local function classify_weak_point(e)
     -- returns tier, label  (tier 0 = no keyword match but still a prop)
     local name = e.ent_name
     if name and name ~= "" then
         local ln = lc(name)
+        -- check tiers in priority order; "barrel" is BOTH a fuel container and
+        -- an explosive drum -> the higher-priority tier (lower number) wins so
+        -- the scan stays deterministic regardless of key iteration order.
         for _, grp in ipairs(WEAK_POINT_KEYWORD_TIERS) do
             for _, k in ipairs(grp.keys) do
-                if ln:find(k, 1, true) then return grp.tier, grp.label end
+                if wp_name_has_keyword(ln, k) then return grp.tier, grp.label end
             end
         end
     end
@@ -419,13 +463,13 @@ local WP_LIFT_TABLE = {
 
 local WP_LIFT_KEYWORDS = {
     { kind = "CYLINDER", keys = { "tank", "barrel", "canister", "cylinder",
-        "propane", "gas", "acetylene", "oxygen", "flam", "fuel", "valve" } },
-    { kind = "WALL", keys = { "generator", "console", "transformer", "pylon",
-        "junction", "battery", "reactor", "power", "vent", "switch", "panel" } },
-    { kind = "VEHICLE", keys = { "car", "truck", "van", "sedan", "suv",
+        "propane", "gascan", "acetylene", "oxygen", "flamethrower", "fuel" } },
+    { kind = "WALL", keys = { "generator", "transformer", "pylon",
+        "battery", "reactor" } },
+    { kind = "VEHICLE", keys = { "truck", "van", "sedan", "suv",
         "vehicle", "bus" } },
-    { kind = "SMALL", keys = { "backpack", "med", "heal", "support", "supply",
-        "ammo", "loader", "purifier" } },
+    { kind = "SMALL", keys = { "backpack", "medkit", "heal", "supply",
+        "ammoload", "ammo_crate", "purifier", "dronebay" } },
 }
 
 local function weak_point_lift_kind(name)
@@ -433,7 +477,7 @@ local function weak_point_lift_kind(name)
     local ln = lc(name)
     for _, grp in ipairs(WP_LIFT_KEYWORDS) do
         for _, k in ipairs(grp.keys) do
-            if ln:find(k, 1, true) then return grp.kind end
+            if wp_name_has_keyword(ln, k) then return grp.kind end
         end
     end
     return "DEFAULT"
@@ -462,12 +506,38 @@ local function name_looks_like_weak_point(name)
     if not name or name == "" then return false end
     local ln = lc(name)
     for _, hint in ipairs(WEAK_POINT_NAME_HINTS) do
-        if ln:find(hint, 1, true) then return true end
+        if wp_name_has_keyword(ln, hint) then return true end
     end
     for _, grp in ipairs(WEAK_POINT_KEYWORD_TIERS) do
         for _, k in ipairs(grp.keys) do
-            if ln:find(k, 1, true) then return true end
+            if wp_name_has_keyword(ln, k) then return true end
         end
+    end
+    return false
+end
+
+-- CRITICAL GUARD: a real agent (humanoid soldier, dog, boss) is NEVER a weak
+-- point, no matter what its name contains.  Previous versions matched name
+-- keywords against NPC names too ("AssaultTank", "Medic", "SupportBackpack"
+-- style names), which made silent aim treat the whole AGENT as a prop: the
+-- aim point became entityPos + small lift = the NPC's FEET/legs.  That is the
+-- exact bug reported ("aims at legs / who knows where").  Only entities whose
+-- type is GADGET/unknown (i.e. NOT ENTITY_TYPE_NPC / PLAYER) may qualify via
+-- name heuristics; explicit destructible archetypes still pass.
+local WEAK_POINT_AGENT_TYPES = {}
+for _, t in ipairs({ ENTITY_TYPE_NPC, ENTITY_TYPE_PLAYER }) do
+    WEAK_POINT_AGENT_TYPES[t] = true
+end
+
+local function is_agent_entity(e)
+    if WEAK_POINT_AGENT_TYPES[e.entity_type_int] then return true end
+    if e.entity_type ~= nil and WEAK_POINT_AGENT_TYPES[e.entity_type] then
+        return true
+    end
+    -- readable combat archetype id => it is an agent, not a loose prop
+    if e.archetype ~= nil and e.archetype > 0
+       and ARCHETYPE_NAME_BY_ID[e.archetype] then
+        return true
     end
     return false
 end
@@ -480,6 +550,13 @@ local function is_weak_point_entity(e)
     if e.archetype ~= nil and WEAK_POINT_ARCHETYPES[e.archetype] then
         return true
     end
+    -- AGENT GUARD: real NPCs/players (type 5/6 or readable combat archetype)
+    -- must NEVER be classified as weak points by name heuristics.  Without
+    -- this, a boss named "...Tank..." or a medic with a backpack in its name
+    -- became a "prop", aim_point_for fell back to entityPos+lift and silent
+    -- aim put the crosshair on the NPC's legs — exactly the misaim that was
+    -- reported.
+    if is_agent_entity(e) then return false end
     if name_looks_like_weak_point(e.ent_name) then return true end
     if e.entity_type_int == ENTITY_TYPE_GADGET then
         if e.archetype == nil or e.archetype == NPC_ARCHETYPE.Unset then
@@ -494,6 +571,27 @@ local function is_weak_point_entity(e)
         end
     end
     return false
+end
+
+-- Final safety gate used by the SILENT AIM path only (ESP may still draw every
+-- prop).  A weak point must be either a real gadget/prop entity type OR expose
+-- no agent archetype, AND must not be positioned exactly like a standing NPC
+-- we can see bones for.  If an entity passed the name heuristics but actually
+-- has a full skeleton with readable bones, it IS an agent -> refuse to treat
+-- it as a prop so we never aim at someone's legs.
+local function silent_accepts_weak_point(e)
+    if not is_weak_point_entity(e) then return false end
+    local b = e.bones
+    if type(b) == "table" then
+        local n = 0
+        for _ in pairs(b) do n = n + 1 end
+        -- real agents expose dozens of bones; destructible props expose none
+        -- (bone read fails).  If we DO see a skeleton on this "prop", it is an
+        -- NPC -> never aim at its entityPos (legs); let the normal head/body
+        -- path handle it instead.
+        if n >= 5 then return false end
+    end
+    return true
 end
 
 -- A weak point counts as a live silent-aim target while it still has health.
@@ -676,7 +774,11 @@ local function is_silent_target(e)
     -- weak-point props: lightweight gadget entities. They classify as
     -- "friendly" via the normal pipeline, so they must bypass relation /
     -- archetype filtering here, otherwise the aimbot never sees them.
-    if is_weak_point_entity(e) then
+    -- IMPORTANT: only accept it as a PROP when silent_accepts_weak_point
+    -- confirms there is no real skeleton on it; otherwise fall through to the
+    -- regular NPC path below so we aim at head/chest bones instead of the
+    -- entity origin (which sits at the NPC's feet -> shots into legs).
+    if is_weak_point_entity(e) and silent_accepts_weak_point(e) then
         if not state.weak_points_first then return false end
         if not is_alive_weak_point(e) then return false end
         -- props whose HP refused to drop while locked are temporarily ignored
@@ -2252,7 +2354,7 @@ local function aim_point_for(e)
     -- which would fall back to "head + 1.2m" above an object that has no head.
     -- NOTE: the entity origin of many props sits at their FEET, so we raise
     -- the aim point into the actual damage volume (see weak_point_aim_offset).
-    if is_weak_point_entity(e) then
+    if is_weak_point_entity(e) and silent_accepts_weak_point(e) then
         return aim_point_for_weak_point(e)
     end
 
@@ -2375,7 +2477,9 @@ local function find_silent_target(entities, viewproj, wr)
                     local dist_px = math.sqrt(dx * dx + dy * dy)
                     if dist_px < state.silent_fov then
                         local score = -dist_px
-                        if state.weak_points_first and is_weak_point_entity(e) then
+                        if state.weak_points_first
+                           and is_weak_point_entity(e)
+                           and silent_accepts_weak_point(e) then
                             -- tier priority: HEALER backpacks first, then fuel
                             -- tanks / generators, then generic explosives
                             local tier, _lbl = classify_weak_point(e)
@@ -2586,7 +2690,9 @@ local function silent_tick(pid, base)
  
             local tp = aim_point_for(target)
             if tp then
-                state.silent_target_kind = is_weak_point_entity(target)
+                state.silent_target_kind =
+                    (is_weak_point_entity(target)
+                     and silent_accepts_weak_point(target))
                     and "weak point" or "npc"
                 local aim_addr = aim + OFF.worldAimPos
                 local aim_bytes = pack_vec3(tp)
@@ -2608,7 +2714,7 @@ local function silent_tick(pid, base)
  
                 state.diag_last_write = { tp[1], tp[2], tp[3] }
                 state.silent_armed = true
-                if is_weak_point_entity(target) then
+                if state.silent_target_kind == "weak point" then
                     state.silent_target_name = string.format(
                         "WEAK POINT %s (%s) %.0fm",
                         target.wp_label or "PROP",
