@@ -42,6 +42,21 @@ local OFF = {
     hpPtr        = 0x7D0,
     health       = 0x5C,
     healthMax    = 0x60,
+    -- Armor lives INSIDE the HP component (hpPtr + off), not on the entity.
+    -- Values verified against TD2-Dumper (github.com/KushKoyote/TD2-Dumper):
+    --   OFF_agentarmor     = 0x254 / agentarmorMax   = 0x258 (players)
+    --   OFF_npcArmor       = 0x1C4 / npcArmorMax     = 0x1C8 (NPCs + props)
+    agentarmorInHp     = 0x254,
+    agentarmorMaxInHp  = 0x258,
+    npcArmorInHp       = 0x1C4,
+    npcArmorMaxInHp    = 0x1C8,
+    -- Weak-point props (boss backpacks / propane tanks) are NOT agents: they
+    -- use a lighter HealthComponent whose armor/shield fields sit at smaller
+    -- offsets inside the same hpPtr block. Reading these lets us detect when
+    -- a prop is still shielded (hits absorbed by armor -> hp never drops ->
+    -- silent aim would otherwise hold the lock forever).
+    wpArmor            = 0x30,
+    wpArmorMax         = 0x34,
     factionCtx   = 0x3E0,
  
     entityTypeInt = 0xC00,
@@ -306,17 +321,22 @@ local ALL_BONE_IDS_SPARSE = {
 
 -- Weak-point (backpack / propane / turret battery) entities: in TD2 these are
 -- NOT bones of the boss rig. They spawn as separate lightweight entities.
--- Empirically they show up either as entityTypeInt == -1 (GADGET) or as a
--- regular NPC-type entity whose descriptor chain cannot be read at all
--- (archetype == nil -> profile NO_SKELETON) while still owning an HP component
--- with a sane health value. DestructibleProp(47)/Trap(70)/Hive(71) archetypes
--- are explicit weak-point props too.
-local WEAK_POINT_BONE_IDS = { 3, 5, 11, 12, 19, 20, 21, 24, 26, 43, 49, 50 }
-
+-- Detection rules (in order):
+--   1. explicit destructible archetypes (DestructibleProp/Trap/Hive);
+--   2. entity name matches a known prop keyword;
+--   3. GADGET-type entity whose descriptor chain cannot be resolved to a
+--      real archetype (player skill gadgets ALWAYS resolve to a known
+--      archetype id; boss props keep archetype Unset(0) or nil);
+--   4. NEW fallback: any entity that has NO readable descriptor chain at all
+--      but DOES own a valid HP component with hp_max in a sane range. This
+--      catches props even when entityTypeInt@0xC00 reads as garbage/0, which
+--      is why weak points previously were never found.
 local WEAK_POINT_NAME_HINTS = {
     "backpack", "propane", "tank", "gas", "canister", "cylinder",
     "explosive", "weakpoint", "weak_point", "weak point", "vulnerable",
     "battery", "reactor", "core", "loader", "ammoload", "fuel",
+    "barrel", "oxygen", "acetylene", "valve", "vent", "console",
+    "generator", "junction", "transformer", "pylon", "charge",
 }
 
 local WEAK_POINT_ARCHETYPES = {}
@@ -335,22 +355,44 @@ end
 
 local function is_weak_point_entity(e)
     if not e or e.is_player then return false end
-    if e.hp_max <= 0 or e.hp_max > 2000000 then return false end
+    -- props are never "downed" agents; keep the guard anyway so corpses of
+    -- NPCs can't be mistaken for weak points via the fallback rules below
+    if e.is_downed then return false end
     if e.archetype ~= nil and WEAK_POINT_ARCHETYPES[e.archetype] then
         return true
     end
     if name_looks_like_weak_point(e.ent_name) then return true end
     if e.entity_type_int == ENTITY_TYPE_GADGET then
-        -- player skills/gadgets always resolve to a known archetype id;
-        -- boss props (backpacks/tanks) keep archetype Unset(0) or nil
         if e.archetype == nil or e.archetype == NPC_ARCHETYPE.Unset then
             return true
         end
     elseif e.archetype == nil then
-        -- NPC-typed entity without a readable descriptor => prop, not an agent
-        return true
+        -- No readable descriptor chain. If it also owns a valid HP component
+        -- it is a destructible prop, not an agent (agents always expose an
+        -- archetype through NpcAgentDescriptor).
+        if e.has_hp and e.hp_max > 0 and e.hp_max <= 2000000 then
+            return true
+        end
     end
     return false
+end
+
+-- A weak point counts as a live silent-aim target while it still has health.
+-- Props with an armor/shield layer are NOT filtered out here (a wrong armor
+-- offset would make every prop look shielded and the aimbot would never see
+-- them); instead the stall watchdog in wp_watchdog releases the lock when HP
+-- refuses to drop while we keep firing at the prop.
+local function is_alive_weak_point(e)
+    if not is_weak_point_entity(e) then return false end
+    if not e.has_hp then return true end          -- no HP info: assume shootable
+    if e.hp <= 0 then return false end
+    -- NOTE: we intentionally do NOT skip props that still have armor/shield.
+    -- Reading a wrong offset would make every prop look "shielded" and the
+    -- aimbot would silently refuse to target any of them (this was the exact
+    -- reason weak points were never found before). Shielded props are handled
+    -- by the stall watchdog instead: if HP refuses to drop while we keep
+    -- firing, the prop is temporarily ignored and the aim moves on.
+    return true
 end
  
 local ALL_BONE_IDS_0_90 = {}
@@ -373,6 +415,11 @@ local SILENT_LOCK_DELTA       = 2.0
 -- aim keeps holding the same prop until it is destroyed instead of flitting
 -- between several backpacks/tanks that are closer to the crosshair
 local SILENT_WP_STICK_BONUS   = 500.0
+-- watchdog: if the locked prop's HP did not move while we kept firing at it,
+-- release the lock for a while (invulnerable / wrong hit surface) so silent
+-- aim can move on to other weak points or the head
+local WP_STALL_LIMIT          = 3
+local WP_IGNORE_SECONDS       = 8.0
  
 local LOCK_ID = {
     silent     = 10001,
@@ -511,9 +558,26 @@ local function is_silent_target(e)
     -- "friendly" via the normal pipeline, so they must bypass relation /
     -- archetype filtering here, otherwise the aimbot never sees them.
     if is_weak_point_entity(e) then
-        return state.weak_points_first
+        if not state.weak_points_first then return false end
+        if not is_alive_weak_point(e) then return false end
+        -- props whose HP refused to drop while locked are temporarily ignored
+        -- (likely invulnerable / wrong hit position), so the aimbot can move
+        -- on to other weak points or the head instead of stalling forever
+        local until_t = state.wp_ignored[e.entity_ptr]
+        if until_t and os.clock() < until_t then return false end
+        return true
     end
-    if e.is_summoned and not state.silent_target_summon then return false end
+    -- NOTE: player-deployed gadgets (turrets/skills, ARCHETYPE_IS_GADGET) are
+    -- intentionally NOT silent targets anymore; only real NPC types pass the
+    -- filter below. Boss backpacks/tanks still reach this function through
+    -- the is_weak_point_entity branch above.
+    if e.is_summoned then
+        if e.relation == "hostile" then
+            if not state.silent_target_summon then return false end
+        else
+            return false
+        end
+    end
     if e.entity_type ~= ENTITY_TYPE_NPC then return false end
  
     local pname = profile_name_for(e)
@@ -526,7 +590,9 @@ local function is_silent_target(e)
  
     if pname == "TURRET" then return true end
     if pname == "ITEM" then return false end
-    if e.is_summoned and e.relation ~= "hostile" then return false end
+    -- own deployed skills/gadgets are never valid targets (their relation is
+    -- friendly/neutral and the check below catches them; hostile enemy
+    -- summons stay targetable when the toggle is on)
     if e.relation == "friendly" or e.relation == "neutral" then return false end
  
     if e.archetype ~= nil then
@@ -614,6 +680,20 @@ state = {
     silent_armed         = false,
     silent_seen_gen      = 0,
     silent_target_ptr    = nil,
+    wp_seen_count        = 0,
+    wp_destroyed         = 0,
+    wp_lock_start_hp     = 0,
+    wp_lock_ptr          = nil,
+    wp_lock_prev_hp      = nil,
+    wp_lock_stall        = 0,
+    wp_last_shots        = 0,
+    wp_ignore_until      = 0,
+    wp_ignored           = {},
+    last_shot_rounds     = 0,
+    last_shot_aim        = nil,
+    last_shot_pos        = nil,
+    last_shot_name       = "",
+    hit_debug            = "",
  
     diag_last_write = nil,
  
@@ -2156,8 +2236,107 @@ local function find_silent_target(entities, viewproj, wr)
             end
         end
     end
+    -- record the currently locked weak point's HP so wp_watchdog can detect
+    -- "hp stopped dropping" (shielded / invulnerable prop) and release the
+    -- lock instead of aiming at an unkillable object forever
+    if best_wp and best_wp.has_hp then
+        if state.wp_lock_ptr ~= best_wp.entity_ptr then
+            state.wp_lock_ptr      = best_wp.entity_ptr
+            state.wp_lock_prev_hp  = best_wp.hp
+            state.wp_lock_start_hp = best_wp.hp
+            state.wp_lock_stall    = 0
+        elseif best_wp.hp < (state.wp_lock_prev_hp or best_wp.hp) then
+            state.wp_lock_prev_hp = best_wp.hp
+            state.wp_lock_stall   = 0
+        end
+    elseif not best_wp then
+        state.wp_lock_ptr     = nil
+        state.wp_lock_stall   = 0
+        state.wp_lock_prev_hp = nil
+    end
     if best_wp then return best_wp end
     return best_np
+end
+
+-- Weak-point watchdog: runs once per frame with the entity list that was just
+-- produced by the ESP scan. Tracks the currently locked prop's HP across
+-- frames and fires while we are actually shooting at it:
+--   * HP dropped                  -> reset stall counter, keep the lock
+--   * HP unchanged + shots fired  -> stall++ ; after WP_STALL_LIMIT stalled
+--     shot-windows the prop is marked ignored for WP_IGNORE_SECONDS so the
+--     aimbot can move on (invulnerable surface / dead-but-not-despawned prop)
+--   * prop despawned / hp <= 0    -> count as destroyed, clear the lock
+local function wp_watchdog()
+    local now = os.clock()
+
+    -- purge expired ignore entries so a prop gets a second chance later
+    for ptr, until_t in pairs(state.wp_ignored) do
+        if now >= until_t then state.wp_ignored[ptr] = nil end
+    end
+
+    -- find the entity the aimbot is currently holding a lock on
+    local cur = nil
+    if state.wp_lock_ptr then
+        for _, e in ipairs(state.entities) do
+            if e.entity_ptr == state.wp_lock_ptr then cur = e break end
+        end
+    end
+
+    -- locked prop despawned / killed -> count it as destroyed and clear lock
+    if state.wp_lock_ptr and (not cur or not is_weak_point_entity(cur)
+       or (cur.has_hp and cur.hp <= 0)) then
+        state.wp_destroyed = state.wp_destroyed + 1
+        state.hit_debug = string.format(
+            "Weak point destroyed (%d total), switching target",
+            state.wp_destroyed)
+        state.wp_lock_ptr        = nil
+        state.wp_lock_prev_hp    = nil
+        state.wp_lock_stall      = 0
+        state.wp_lock_start_hp   = 0
+        return
+    end
+
+    -- freshly locked prop: register first-seen stats
+    if cur and state.wp_seen_ptr ~= cur.entity_ptr then
+        state.wp_seen_ptr = cur.entity_ptr
+        state.wp_seen_count = state.wp_seen_count + 1
+        state.wp_last_shots = state.silent_shots
+        state.hit_debug = string.format("Locked weak point #%d (hp %d)",
+            state.wp_seen_count, cur.hp)
+    end
+
+    -- stall detection: while the SAME prop stays locked and we keep firing
+    -- new rounds but its HP refuses to drop, mark it ignored for a while so
+    -- silent aim moves on to other props / the head. find_silent_target
+    -- updates wp_lock_prev_hp whenever HP drops, so any real hit resets us.
+    if cur and cur.has_hp and state.wp_lock_prev_hp ~= nil
+       and cur.hp >= (state.wp_lock_prev_hp or cur.hp)
+       and state.silent_shots > (state.wp_last_shots or 0) then
+        state.wp_last_shots = state.silent_shots
+        state.wp_lock_stall = (state.wp_lock_stall or 0) + 1
+        if state.wp_lock_stall >= WP_STALL_LIMIT then
+            state.wp_ignored[cur.entity_ptr] = now + WP_IGNORE_SECONDS
+            state.hit_debug = string.format(
+                "Weak point hp stuck at %d -> ignoring %.0fs",
+                cur.hp, WP_IGNORE_SECONDS)
+            state.wp_lock_ptr     = nil
+            state.wp_lock_prev_hp = nil
+            state.wp_lock_stall   = 0
+            state.wp_seen_ptr     = nil
+        end
+    end
+end
+
+-- Scan the raw entity list (NOT the filtered silent-target list) and count
+-- how many entities currently look like destructible weak points. Used by
+-- the UI diagnostics so the user can tell apart "no props nearby" from
+-- "props exist but the filter rejects them".
+local function count_weak_point_candidates()
+    local n = 0
+    for _, e in ipairs(state.entities) do
+        if not e.is_player and is_weak_point_entity(e) then n = n + 1 end
+    end
+    return n
 end
  
 local function pack_vec3(v)
@@ -2714,6 +2893,7 @@ function OnUpdate(dt)
  
             local hp_valid_index = {}
             local hp_data_addrs = {}
+            local wp_armor_addrs = {}
             local hp_slot_count = 0
             for i = 1, #ptrs do
                 local off = (i - 1) * 8
@@ -2724,11 +2904,22 @@ function OnUpdate(dt)
                         hp_valid_index[i] = hp_slot_count
                         hp_data_addrs[#hp_data_addrs + 1] = hp + OFF.health
                         hp_data_addrs[#hp_data_addrs + 1] = hp + OFF.healthMax
+                        -- prop armor/shield pool (only meaningful for weak
+                        -- points; garbage on agents is filtered out later via
+                        -- the hp_max sanity check in is_alive_weak_point)
+                        wp_armor_addrs[hp_slot_count] = hp + OFF.wpArmor
                     end
                 end
             end
             local hp_data_raw = #hp_data_addrs > 0
                 and batch_read_chunked(pid, 4, hp_data_addrs) or nil
+
+            local wp_armor_raw = nil
+            if #wp_armor_addrs > 0 then
+                local a_list = {}
+                for s = 1, hp_slot_count do a_list[#a_list + 1] = wp_armor_addrs[s] end
+                wp_armor_raw = batch_read_chunked(pid, 4, a_list)
+            end
  
             do
                 local misses, seen = {}, {}
@@ -2876,12 +3067,19 @@ end
                                     local faction_tag = state.faction_tag_cache[faction] or ""
  
                                     local hp_val, hp_max = 0, 0
+                                    local wp_armor = 0
                                     local vi = hp_valid_index[i]
                                     if vi and hp_data_raw then
                                         local doff = (vi - 1) * 8
                                         if #hp_data_raw >= doff + 8 then
                                             hp_val = uint_from(hp_data_raw, doff + 1, 4)
                                             hp_max = uint_from(hp_data_raw, doff + 5, 4)
+                                        end
+                                    end
+                                    if vi and wp_armor_raw then
+                                        local aoff = (vi - 1) * 4
+                                        if #wp_armor_raw >= aoff + 4 then
+                                            wp_armor = uint_from(wp_armor_raw, aoff + 1, 4)
                                         end
                                     end
                                     local is_low_hp = hp_max > 0 and (hp_val / hp_max) < 0.1
@@ -2949,6 +3147,8 @@ end
                                         faction_tag = faction_tag,
                                         is_downed = is_downed,
                                         hp = hp_val, hp_max = hp_max,
+                                        wp_armor = wp_armor,
+                                        has_hp = (vi ~= nil),
                                         is_low_hp = is_low_hp,
                                         archetype = archetype,
                                         archetype_name = (archetype ~= nil)
@@ -2991,6 +3191,7 @@ end
  
  
         silent_tick(pid, base)
+        pcall(wp_watchdog)
  
         state.telem_valid       = false
         state.telem_world_aim   = nil
@@ -3343,6 +3544,12 @@ end
                 ui.small("Target: " .. (state.silent_target_name ~= "" and state.silent_target_name or "none"))
                 ui.small(state.silent_armed and "ARMED (kernel lock ~10ms)" or "idle")
                 ui.small("Shots: " .. state.silent_shots)
+                ui.separator()
+                ui.small(string.format("Weak points nearby: %d  locked: %d  destroyed: %d",
+                    count_weak_point_candidates(),
+                    state.wp_lock_ptr and 1 or 0,
+                    state.wp_destroyed))
+                if state.hit_debug ~= "" then ui.small(state.hit_debug) end
             end)
  
             ui.collapsing_header("ESP settings", function()
