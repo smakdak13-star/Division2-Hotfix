@@ -74,6 +74,7 @@ local OFF = {
     combatAimMoveSpreadAdd     = 0x3840,
     combatAimLerpedMoveSpeed   = 0x3844,
  
+    weapTemplateDamageMin      = 0x40,
     weapTemplateDamageMax      = 0x44,
     weapTemplateDmgMultHead    = 0xA0,
     weapTemplateSwayMinH       = 0x2B8,
@@ -300,6 +301,10 @@ local ALL_BONE_IDS_SPARSE = {
     36, 37, 38, 39, 40, 41, 42, 44, 45, 46, 47, 48,
     78, 79, 80, 83, 84, 86, 87, 88, 91, 92,
 }
+
+-- Weak-point (backpack / propane / turret battery) bones that are NOT part of
+-- the standard rig. Read additionally when "weak points first" is enabled.
+local WEAK_POINT_BONE_IDS = { 3, 5, 11, 12, 19, 20, 21, 24, 26, 43, 49, 50 }
  
 local ALL_BONE_IDS_0_90 = {}
 for i = 0, 90 do ALL_BONE_IDS_0_90[#ALL_BONE_IDS_0_90 + 1] = i end
@@ -420,6 +425,11 @@ local function profile_name_for(e)
 end
  
 local state
+
+-- Forward declarations (definitions further below). Needed so that the
+-- weak-point helpers can be used by functions defined earlier in the file.
+local aim_point_for
+local should_show
  
 local function get_color(e)
     if e.is_player then
