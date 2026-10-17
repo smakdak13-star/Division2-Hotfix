@@ -344,11 +344,109 @@ for _, k in ipairs({ "DestructibleProp", "Trap", "Hive" }) do
     WEAK_POINT_ARCHETYPES[NPC_ARCHETYPE[k]] = true
 end
 
+-- Per-archetype weak-point keyword table (The Division 2).
+-- Bosses / named enemies on Legendary + Raid difficulty carry destructible
+-- gadgets that must be destroyed before their armor becomes breakable:
+--   True Son bosses (General Cross, "Gator", Commander Hyena crew leaders):
+--       healing backpacks ("backpack", "purifier", "med")
+--   Cleaners leaders (Lucas "Sadie" Oliveira, Pest engineers):
+--       flamethrower fuel tanks ("flam", "fuel", "tank", "propane")
+--   Black Tusk elite / Exo supports (Riley's Washington, BNT task force):
+--       exo backpacks / generator packs ("generator", "exo", "battery")
+--   Dark Zone / Manhunt raid props:
+--       explosive barrels & car traps ("barrel", "explosive", "car")
+-- Keys are matched as lowercase substrings against the entity NAME of a
+-- gadget/prop entity; a hit boosts its priority tier and tags it with a
+-- human-readable kind so silent aim locks the RIGHT prop first.
+local WEAK_POINT_KEYWORD_TIERS = {
+    -- tier A: heals/shields the boss -> kill FIRST
+    { tier = 1, label = "HEALER",
+      keys = { "backpack", "purifier", "med", "heal", "support", "dronebay",
+               "supply", "ammoload", "loader", "ammo" } },
+    -- tier B: big damage source (flamethrower tank, exo pack, generator)
+    { tier = 2, label = "FUEL",
+      keys = { "flam", "fuel", "propane", "gas", "tank", "canister",
+               "cylinder", "acetylene", "oxygen", "valve", "barrel",
+               "generator", "reactor", "battery", "power", "transformer",
+               "junction", "pylon", "console", "vent" } },
+    -- tier C: anything else explicitly destructible/explosive
+    { tier = 3, label = "EXPLOSIVE",
+      keys = { "explosive", "weakpoint", "weak_point", "weak point",
+               "vulnerable", "charge", "core", "hive", "trap" } },
+}
+
+local function classify_weak_point(e)
+    -- returns tier, label  (tier 0 = no keyword match but still a prop)
+    local name = e.ent_name
+    if name and name ~= "" then
+        local ln = lc(name)
+        for _, grp in ipairs(WEAK_POINT_KEYWORD_TIERS) do
+            for _, k in ipairs(grp.keys) do
+                if ln:find(k, 1, true) then return grp.tier, grp.label end
+            end
+        end
+    end
+    return 0, "PROP"
+end
+
+-- The entity position in TD2 is the object's ORIGIN, which for many props is
+-- at their FEET (e.g. a propane "tank" prop whose origin sits on the ground
+-- under it). Silent aim must write the actual damage volume center instead:
+--   * tall props (fuel tanks / generators / consoles): raise the aim point to
+--     ~55% of the box height, clamped to [0.4m .. 1.4m] above the origin;
+--   * when the prop has an HP component that reports armor/shield remaining,
+--     the shootable layer is the armor volume - aim slightly higher (+0.35m);
+--   * flat/small props (backpacks on the boss, low barrels): keep the raw
+--     origin, since their hitbox is centered there.
+-- Aiming at the feet was exactly why the "tank" weak point looked like it was
+-- placed in the NPC's legs.
+local WEAK_POINT_NAME_HINTS_TALL = {
+    "tank", "generator", "console", "transformer", "pylon", "junction",
+    "battery", "reactor", "barrel", "canister", "cylinder", "propane",
+    "valve", "vent",
+}
+
+local function weak_point_aim_offset(e)
+    local dy = 0.0
+    local name = e.ent_name
+    if name and name ~= "" then
+        local ln = lc(name)
+        for _, hint in ipairs(WEAK_POINT_NAME_HINTS_TALL) do
+            if ln:find(hint, 1, true) then
+                local h = tonumber(e.hp_max) or 0
+                local lift = 0.55
+                if h >= 100000 then lift = 0.45 end   -- huge boxes: mid-low
+                if h <= 100    then lift = 0.70 end   -- tiny boxes: upper half
+                dy = lift * h
+                if dy < 0.40 then dy = 0.40 end
+                if dy > 1.40 then dy = 1.40 end
+                break
+            end
+        end
+    end
+    -- armored props: the armor layer is the outer, currently-damageable
+    -- volume; nudge the ray toward its upper part so hits actually register
+    if (tonumber(e.wp_armor) or 0) > 0 then
+        dy = math.min(dy + 0.35, 1.6)
+    end
+    return dy
+end
+
+local function aim_point_for_weak_point(e)
+    local p = e.pos
+    return { p[1], p[2] + weak_point_aim_offset(e), p[3] }
+end
+
 local function name_looks_like_weak_point(name)
     if not name or name == "" then return false end
     local ln = lc(name)
     for _, hint in ipairs(WEAK_POINT_NAME_HINTS) do
         if ln:find(hint, 1, true) then return true end
+    end
+    for _, grp in ipairs(WEAK_POINT_KEYWORD_TIERS) do
+        for _, k in ipairs(grp.keys) do
+            if ln:find(k, 1, true) then return true end
+        end
     end
     return false
 end
@@ -972,6 +1070,10 @@ end
 local function classify_pipeline(e, ctx)
     local etype = e.entity_type_int
     if etype == ENTITY_TYPE_NPC or etype == ENTITY_TYPE_GADGET then
+        -- destructible weak-point props (boss backpacks / fuel tanks) often
+        -- carry the boss's faction id; without this early-exit the faction
+        -- check below marks them "friendly" and silent aim never sees them
+        if is_weak_point_entity(e) then return "hostile" end
         if e.tier_valid and e.tier == NPC_THREAT_TIER.NonThreat then
             return "friendly"
         end
@@ -2126,8 +2228,10 @@ local function aim_point_for(e)
     -- position itself (this is the prop's world center, where its HP
     -- component takes hits). Never route them through the humanoid profile,
     -- which would fall back to "head + 1.2m" above an object that has no head.
+    -- NOTE: the entity origin of many props sits at their FEET, so we raise
+    -- the aim point into the actual damage volume (see weak_point_aim_offset).
     if is_weak_point_entity(e) then
-        return { e.pos[1], e.pos[2], e.pos[3] }
+        return aim_point_for_weak_point(e)
     end
 
     local pname = profile_name_for(e)
@@ -2207,6 +2311,38 @@ local function find_silent_target(entities, viewproj, wr)
     -- holding the SAME prop until its HP reaches 0 / it despawns.
     local best_wp, best_wp_score = nil, -math.huge
     local best_np, best_np_score = nil, -math.huge
+
+    -- cache of humanoid NPC positions for owner-proximity scoring: a prop
+    -- that sits on/next to a boss (healing backpack etc.) outranks loose
+    -- environmental barrels across the room
+    local npc_positions = {}
+    if state.weak_points_first then
+        for _, e in ipairs(entities) do
+            if not e.is_player and not e.is_downed
+               and e.entity_type == ENTITY_TYPE_NPC
+               and (e.relation == "hostile" or e.relation == "unknown")
+               and e.pos then
+                npc_positions[#npc_positions + 1] = e.pos
+            end
+        end
+    end
+
+    local function wp_owner_bonus(e)
+        if #npc_positions == 0 then return 0 end
+        local best_d2 = math.huge
+        for _, p in ipairs(npc_positions) do
+            local dx = e.pos[1] - p[1]
+            local dy = e.pos[2] - p[2]
+            local dz = e.pos[3] - p[3]
+            local d2 = dx * dx + dy * dy + dz * dz
+            if d2 < best_d2 then best_d2 = d2 end
+        end
+        -- within 4 m of an enemy -> strong bonus, fading out to 10 m
+        if best_d2 <= 16 then return 2000 end
+        if best_d2 <= 100 then return 800 end
+        return 0
+    end
+
     for _, e in ipairs(entities) do
         if not e.is_player and is_silent_target(e) and e.dist <= state.silent_max_dist then
             local tp = aim_point_for(e)
@@ -2218,6 +2354,11 @@ local function find_silent_target(entities, viewproj, wr)
                     if dist_px < state.silent_fov then
                         local score = -dist_px
                         if state.weak_points_first and is_weak_point_entity(e) then
+                            -- tier priority: HEALER backpacks first, then fuel
+                            -- tanks / generators, then generic explosives
+                            local tier, _lbl = classify_weak_point(e)
+                            score = score + (3 - tier) * 3000
+                            score = score + wp_owner_bonus(e)
                             if state.silent_target_ptr
                                and e.entity_ptr == state.silent_target_ptr
                                and e.hp > 0 then
@@ -2447,8 +2588,9 @@ local function silent_tick(pid, base)
                 state.silent_armed = true
                 if is_weak_point_entity(target) then
                     state.silent_target_name = string.format(
-                        "WEAK POINT (%s) %.0fm",
-                        (target.ent_name ~= "" and target.ent_name or "prop"),
+                        "WEAK POINT %s (%s) %.0fm",
+                        target.wp_label or "PROP",
+                        (target.ent_name ~= "" and target.ent_name or "unnamed"),
                         target.dist)
                 else
                     state.silent_target_name = string.format(
@@ -3130,7 +3272,27 @@ end
                                         pred_pos[2] = pos[2] + (pos[2] - prev[2]) * ESP_PREDICT_STRENGTH
                                         pred_pos[3] = pos[3] + (pos[3] - prev[3]) * ESP_PREDICT_STRENGTH
                                     end
- 
+
+                                    -- weak-point kind tag for ESP / target name:
+                                    -- HEALER (boss healing backpack), FUEL
+                                    -- (flamethrower tank / generator), EXPLOSIVE
+                                    local wp_tier, wp_label = nil, nil
+                                    if not is_player then
+                                        local probe = {
+                                            is_player       = false,
+                                            is_downed       = is_downed,
+                                            archetype       = archetype,
+                                            ent_name        = ent_name,
+                                            entity_type_int = entity_type_int,
+                                            has_hp          = (vi ~= nil),
+                                            hp_max          = hp_max,
+                                            wp_armor        = wp_armor,
+                                        }
+                                        if is_weak_point_entity(probe) then
+                                            wp_tier, wp_label = classify_weak_point(probe)
+                                        end
+                                    end
+
                                     ents[#ents + 1] = {
                                         pos = pos, pred_pos = pred_pos,
                                         dist = dist, entity_ptr = ptrs[i],
@@ -3154,6 +3316,7 @@ end
                                         archetype_name = (archetype ~= nil)
                                             and ARCHETYPE_NAME_BY_ID[archetype] or nil,
                                         tier = tier, tier_valid = tier_valid,
+                                        wp_tier = wp_tier, wp_label = wp_label,
                                     }
                                 end
                             end
@@ -3264,6 +3427,22 @@ end
  
                             local box_h, box_w, box_cx, box_cy = compute_box(e, m, w, sx, sy)
                             sx = box_cx or sx
+
+                            -- for weak-point props draw an explicit marker at
+                            -- the exact world position silent aim writes into
+                            -- the aim-control (damage-volume center). If this
+                            -- cross does NOT sit on the visible prop (e.g. it
+                            -- appears in the NPC's legs), the offset heuristic
+                            -- below needs adjusting for that prop type.
+                            if is_wp then
+                                local ap = aim_point_for_weak_point(e)
+                                local ax, ay = world_to_screen(ap, m, w)
+                                if ax and ay then
+                                    draw.line(ax - 6, ay, ax + 6, ay, 255, 200, 0, 230, 1.5)
+                                    draw.line(ax, ay - 6, ax, ay + 6, 255, 200, 0, 230, 1.5)
+                                    draw.circle(ax, ay, 4, 255, 200, 0, 180, 1.0)
+                                end
+                            end
  
                             if state.esp_snaplines then
                                 local snap_y = is_summon_box and sy or box_cy
@@ -3329,8 +3508,11 @@ end
                                 local tlabel = e.ent_type
                                 if is_wp then
                                     tlabel = string.format(
-                                        "WEAKPOINT hp %d/%d Ty%d A%s",
+                                        "%s hp %d/%d%s Ty%d A%s",
+                                        e.wp_label or "WEAKPOINT",
                                         e.hp or 0, e.hp_max or 0,
+                                        ((e.wp_armor or 0) > 0)
+                                            and (" ar" .. tostring(e.wp_armor)) or "",
                                         e.entity_type_int or 0,
                                         tostring(e.archetype))
                                 elseif e.archetype_name then
