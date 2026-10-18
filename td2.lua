@@ -943,11 +943,21 @@ local function read_bytes_table(addr, n)
         return {}, 0
     end
     if type(state.pid) ~= "number" or state.pid <= 0
-       or not memory or type(memory.read_bytes) ~= "function" then
+       or not memory then
         return {}, 0
     end
 
-    local ok, raw = pcall(memory.read_bytes, state.pid, addr, n)
+    -- Prefer the batch API: it is a single kernel call per read and was the
+    -- only reader used before; some builds of the trainer do not expose
+    -- memory.read_bytes at all, which silently disabled every pointer walk.
+    local ok, raw
+    if type(memory.batch_read) == "function" then
+        ok, raw = pcall(memory.batch_read, state.pid, n, { addr })
+    elseif type(memory.read_bytes) == "function" then
+        ok, raw = pcall(memory.read_bytes, state.pid, addr, n)
+    else
+        return {}, 0
+    end
     if not ok then return {}, 0 end
     local t, len = to_byte_table(raw)
     if len > n then
@@ -1166,8 +1176,21 @@ local function resolve_rpm_target(lp)
     return read_uint(w2 + OFF.weapPtr2, 8)
 end
  
+-- Кэш цепочки descriptor->archetype/tier: эти значения не меняются в течение
+-- жизни энтити, а раньше каждая сущность давала 4 лишних kernel-чтения каждый
+-- кадр (из-за этого OnUpdate выходил за бюджет 20 мс).
+local _desc_cache = {}
+local _desc_cache_pid = 0
+
 local function read_npc_archetype_and_tier(ent)
     if not OFF.npcDescriptorPtr then return nil, nil end
+    if state.pid ~= _desc_cache_pid then
+        _desc_cache = {}
+        _desc_cache_pid = state.pid
+    else
+        local hit = _desc_cache[ent]
+        if hit then return hit[1], hit[2] end
+    end
     local agent = read_uint(ent + OFF.npcDescriptorPtr, 8)
     if agent == 0 then return nil, nil end
     local desc = read_uint(agent + OFF.npcAgentDescriptor, 8)
@@ -1176,6 +1199,9 @@ local function read_npc_archetype_and_tier(ent)
     local t_raw = read_uint(desc + OFF.npcTierOffset, 4)
     local archetype = (a_raw < 80) and a_raw or nil
     local tier      = (t_raw < 5)  and t_raw or nil
+    if archetype ~= nil or tier ~= nil then
+        _desc_cache[ent] = { archetype, tier }
+    end
     return archetype, tier
 end
  
@@ -2457,6 +2483,17 @@ local function dbg_refresh()
     state.dbg_bone0 = nil
     state.dbg_err = nil
     if state.pid == 0 or state.base == 0 then return end
+    -- Отладочная панель не обязана читаться каждый кадр: читаем раз в ~30
+    -- кадров и держим последний результат (экономия kernel-чтений на кадр).
+    state._dbg_timer = (state._dbg_timer or 0) + 1
+    if state._dbg_timer < 30 then
+        if state._dbg_last then
+            state.dbg_lp_pos = state._dbg_last.lp_pos
+            state.dbg_bone0  = state._dbg_last.bone0
+        end
+        return
+    end
+    state._dbg_timer = 0
     local lp = get_localplayer()
     if lp == 0 then return end
  
@@ -2485,6 +2522,7 @@ local function dbg_refresh()
             end
         end
     end
+    state._dbg_last = { lp_pos = state.dbg_lp_pos, bone0 = state.dbg_bone0 }
 end
  
 function OnStart() end
@@ -3200,6 +3238,9 @@ end
         state.telem_rounds      = 0
         state.telem_lock_addr   = nil
  
+        state._telem_timer = (state._telem_timer or 0) + 1
+        if state._telem_timer >= 4 then state._telem_timer = 0 end
+        if state._telem_timer == 0 then
         pcall(function()
             local lp = get_localplayer()
             if lp == 0 then return end
@@ -3222,6 +3263,7 @@ end
             end
             state.telem_valid = true
         end)
+        end
  
         local wr = state.window_rect
         if not wr or #wr == 0 then
