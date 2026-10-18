@@ -358,8 +358,12 @@ for _, extra in ipairs({ "ammoload", "ammo_crate", "fuel tank", "fueltank",
     WEAK_POINT_NAME_HINTS[#WEAK_POINT_NAME_HINTS + 1] = extra
 end
 
+-- IMPORTANT: Trap / Hive are PLAYER SKILL deployments (Hunter's hive, trap
+-- skill). Marking them as weak points made silent aim lock onto our own
+-- deployed skills lying around the map. Only genuinely environmental
+-- destructibles stay here; enemy-carried gear is matched via name keywords.
 local WEAK_POINT_ARCHETYPES = {}
-for _, k in ipairs({ "DestructibleProp", "Trap", "Hive" }) do
+for _, k in ipairs({ "DestructibleProp" }) do
     WEAK_POINT_ARCHETYPES[NPC_ARCHETYPE[k]] = true
 end
 
@@ -483,6 +487,26 @@ local function weak_point_lift_kind(name)
     return "DEFAULT"
 end
 
+-- Bone-derived aim point (PREFERRED): many TD2 "props" (boss backpacks, exo
+-- packs, mounted gear) actually expose a small bone/collider hierarchy via
+-- the same bonesBase/boneArray chain as agents. The average of their readable
+-- bones is the true damage-volume center — no guesswork about feet origins.
+-- Returns nil when the prop has no usable bones (then we fall back to the
+-- name-keyword lift heuristic below).
+local function wp_bone_center(e)
+    local b = e.bones
+    if type(b) ~= "table" then return nil end
+    local n, sx, sy, sz = 0, 0, 0, 0
+    for _, p in pairs(b) do
+        if p and is_finite(p[1]) and is_finite(p[2]) and is_finite(p[3]) then
+            n = n + 1
+            sx = sx + p[1]; sy = sy + p[2]; sz = sz + p[3]
+        end
+    end
+    if n == 0 then return nil end
+    return { sx / n, sy / n, sz / n }
+end
+
 local function weak_point_aim_offset(e)
     local kind = weak_point_lift_kind(e.ent_name)
     local cfg = WP_LIFT_TABLE[kind] or WP_LIFT_TABLE.DEFAULT
@@ -499,6 +523,11 @@ end
 
 local function aim_point_for_weak_point(e)
     local p = e.pos
+    -- If the prop exposes any bones, use their average directly and ignore
+    -- the slider entirely: the bone center IS the hit volume, lifting it
+    -- further would put the ray above the object (missed shots).
+    local bc = wp_bone_center(e)
+    if bc then return bc end
     return { p[1], p[2] + weak_point_aim_offset(e), p[3] }
 end
 
@@ -559,8 +588,15 @@ local function is_weak_point_entity(e)
     if is_agent_entity(e) then return false end
     if name_looks_like_weak_point(e.ent_name) then return true end
     if e.entity_type_int == ENTITY_TYPE_GADGET then
+        -- Gadget is the type that TD2 assigns to player skill deployments
+        -- (turrets, hives, traps, backups) as well as to environmental props.
+        -- Never classify a gadget with NO HP component and NO weak-point name
+        -- as a shootable weak point: those are invisible skill markers lying
+        -- around the map and used to steal the silent-aim lock.
         if e.archetype == nil or e.archetype == NPC_ARCHETYPE.Unset then
-            return true
+            if e.has_hp or name_looks_like_weak_point(e.ent_name) then
+                return true
+            end
         end
     elseif e.archetype == nil then
         -- No readable descriptor chain. If it also owns a valid HP component
@@ -585,11 +621,12 @@ local function silent_accepts_weak_point(e)
     if type(b) == "table" then
         local n = 0
         for _ in pairs(b) do n = n + 1 end
-        -- real agents expose dozens of bones; destructible props expose none
-        -- (bone read fails).  If we DO see a skeleton on this "prop", it is an
-        -- NPC -> never aim at its entityPos (legs); let the normal head/body
-        -- path handle it instead.
-        if n >= 5 then return false end
+        -- real agents expose dozens of bones; destructible props are probed
+        -- with the small sparse set (see get_bone_ids_for_entity, cap
+        -- WP_MAX_PROP_BONES). If we see MORE than that cap, this "prop" is a
+        -- full-skeleton NPC -> never aim at its entityPos (legs); let the
+        -- normal head/body path handle it instead.
+        if n > WP_MAX_PROP_BONES then return false end
     end
     return true
 end
@@ -740,6 +777,11 @@ local function profile_name_for(e)
 end
  
 local state
+
+-- Weak-point props are read with a small sparse bone set (see
+-- get_bone_ids_for_entity); the >=5-bone heuristic below must only reject
+-- FULL agent skeletons, so the cap has to stay above that probe size.
+local WP_MAX_PROP_BONES = 20
 
 -- Forward declarations (definitions further below). Needed so that the
 -- weak-point helpers can be used by functions defined earlier in the file.
@@ -2078,11 +2120,18 @@ local function get_bone_ids_for_entity(e, read_all)
         return ALL_BONE_IDS_0_90
     end
 
-    -- boss backpacks / propane tanks are separate prop entities without a
-    -- meaningful skeleton; skip bone reads entirely (aiming uses the entity
-    -- position, see aim_point_for)
+    -- boss backpacks / propane tanks are separate prop entities; most have no
+    -- meaningful skeleton (aiming then uses the entity position + lift). But
+    -- carried gear (backpacks, exo packs) DOES expose a few bones whose
+    -- average is the exact damage-volume center — read them so silent aim can
+    -- use wp_bone_center() instead of guessing the vertical offset.
     if is_weak_point_entity(e) then
-        return {}
+        if wp_bone_center(e) ~= nil then
+            return {}   -- bones already known from a previous frame
+        end
+        local b = e.bones
+        if type(b) == "table" and next(b) ~= nil then return {} end
+        return ALL_BONE_IDS_SPARSE
     end
  
     local pname = profile_name_for(e)
