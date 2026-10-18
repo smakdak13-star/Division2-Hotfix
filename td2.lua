@@ -2323,18 +2323,48 @@ local function bytes_match(addr, want)
     return true
 end
 
--- Запись точки прицела с проверкой результата: memory.write_bytes может вернуть
--- false вместо исключения, поэтому молча «несработавшая» запись раньше
--- выглядела как вооружённый silent-аим. Возвращает true только если запись
--- подтверждена (или значение уже стоит в памяти).
-local function force_write_vec3(pid, addr, vals)
-    pcall(memory.write_bytes, pid, addr, vals)
-    if bytes_match(addr, vals) then return true end
-    for _ = 1, 8 do
-        pcall(memory.write_bytes, pid, addr, vals)
+-- Запись вектора float32 с проверкой результата: memory.write_bytes может
+-- вернуть false/nil вместо исключения, поэтому молча «несработавшая» запись
+-- раньше выглядела как вооружённый silent-аим. write_fn передаётся из
+-- silent_tick — тот самый способ записи, который реально доступен в этом
+-- билде трейнера (memory.write_bytes или memory.write_float).
+-- Возвращает true только если запись подтверждена чтением обратно.
+local function force_write_vec3(write_fn, addr, vals)
+    local n = #vals / 4
+    for _ = 1, 10 do
+        pcall(write_fn, addr, vals)
         if bytes_match(addr, vals) then return true end
     end
-    return false
+    -- Последний шанс: покомпонентная запись float (некоторые билды умеют
+    -- писать только 4-байтные float, а не произвольные байтовые блоки)
+    for i = 1, n do
+        local ok = pcall(write_fn, addr + (i - 1) * 4, { vals[(i - 1) * 4 + 1], vals[(i - 1) * 4 + 2], vals[(i - 1) * 4 + 3], vals[(i - 1) * 4 + 4] })
+    end
+    return bytes_match(addr, vals)
+end
+
+-- Проверка «на живца»: пишем тестовый паттерн в worldAimPos и читаем его
+-- обратно. Некоторые билды трейнера имеют memory.write_bytes, но он тихо
+-- возвращает true, ничего не записав (или кидает исключение). Выбираем только
+-- тот метод записи, который реально меняет память.
+local function verify_write_callable(write_fn)
+    local lp = get_localplayer()
+    if lp == 0 then return false end
+    local aim = read_uint(lp + OFF.aimCtrl, 8)
+    if aim == 0 then return false end
+    local addr = aim + OFF.worldAimPos
+    local old_raw, old_len = read_bytes_table(addr, 12)
+    local probe = { 0x00, 0x00, 0xC0, 0x7F, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00 }
+    local okw = pcall(write_fn, addr, probe)
+    if not okw then return false end
+    local verified = bytes_match(addr, probe)
+    -- восстановить исходное значение как можно быстрее (окно ~1 кадр)
+    if old_len >= 12 then
+        pcall(write_fn, addr, { old_raw[1], old_raw[2], old_raw[3], old_raw[4], old_raw[5],
+                                old_raw[6], old_raw[7], old_raw[8], old_raw[9], old_raw[10],
+                                old_raw[11], old_raw[12] })
+    end
+    return verified
 end
 
 local function release_silent_lock(pid)
@@ -2371,13 +2401,60 @@ local function silent_tick(pid, base)
         local lp = get_localplayer()
         if lp == 0 then
             release_silent_lock(pid)
+            state.silent_target_name = "no local player"
             return
         end
         local aim = read_uint(lp + OFF.aimCtrl, 8)
         if aim == 0 then
-            release_silent_lock(pid)
+            -- временный NULL (кадр загрузки/смерть): держим lock на старом
+            -- адресе, если цель ещё валидна — иначе каждый миг нулевого
+            -- чтения разоружал аим полностью
+            if not state.silent_armed then
+                release_silent_lock(pid)
+            end
+            state.silent_target_name = "aimCtrl NULL"
             return
         end
+
+        -- Определяем доступный билду способ записи один раз за тик
+        -- Определяем доступный билду способ записи: пробуем все варианты
+        -- (write_bytes / write_float / write_memory), выбираем тот, который
+        -- реально подтверждает запись чтением обратно.
+        local write_candidates = {}
+        if type(memory.write_bytes) == "function" then
+            write_candidates[#write_candidates + 1] =
+                function(addr, bytes) return memory.write_bytes(pid, addr, bytes) end
+        end
+        if type(memory.write_float) == "function" then
+            write_candidates[#write_candidates + 1] = function(addr, bytes)
+                for i = 1, (#bytes - (#bytes % 4)) / 4 do
+                    memory.write_float(pid, addr + (i - 1) * 4,
+                        from_f32(uint_from(bytes, (i - 1) * 4 + 1, 4)))
+                end
+            end
+        end
+        if type(memory.write_memory) == "function" then
+            write_candidates[#write_candidates + 1] =
+                function(addr, bytes) return memory.write_memory(pid, addr, bytes) end
+        end
+        if #write_candidates == 0 then
+            state.silent_target_name = "no write API"
+            return
+        end
+        if not state._silent_write_verified then
+            local chosen
+            for _, fn in ipairs(write_candidates) do
+                if verify_write_callable(fn) then chosen = fn break end
+            end
+            if chosen then
+                state._silent_write_fn = chosen
+                state._silent_write_verified = true
+            else
+                state.silent_target_name = "writes rejected"
+                return
+            end
+        end
+        local write_fn = state._silent_write_fn
  
         local wr = normalize_window_rect(state.window_rect)
         if not wr then
@@ -2385,6 +2462,22 @@ local function silent_tick(pid, base)
         end
         local target = find_silent_target(state.entities, state.viewproj, wr)
  
+        -- Диагностика "почему нет цели" (видно в UI Silent Aim Settings)
+        if not target then
+            if not state.viewproj then
+                state.silent_no_reason = "no view matrix"
+            elseif not state.window_rect then
+                state.silent_no_reason = "no window rect"
+            elseif #state.entities == 0 then
+                state.silent_no_reason = "no scan data"
+            else
+                state.silent_no_reason = string.format(
+                    "no valid NPC in FOV %d (ents=%d)",
+                    math.floor(state.silent_fov), #state.entities)
+            end
+        else
+            state.silent_no_reason = nil
+        end
         if target then
             if state.silent_target_ptr ~= target.entity_ptr then
                 state.silent_target_ptr = target.entity_ptr
@@ -2401,25 +2494,29 @@ local function silent_tick(pid, base)
                     state.silent_lock_addr = nil
                 end
  
-                -- Если lock уже стоит на нужном адресе и в памяти лежит наша
-                -- точка — не перелистываем lock каждый кадр (перелист сбрасывает
-                -- удержание, и игровой raycast успевает перезаписать значение).
-                local already_locked = state.silent_lock_addr == aim_addr
-                    and bytes_match(aim_addr, aim_bytes)
-
                 local armed_ok = false
-                if not already_locked then
+                if type(memory.lock) == "function" then
+                    -- Lock держим переактивным каждый кадр: игра сама пишет в
+                    -- worldAimPos при каждом выстреле, и без постоянного
+                    -- удержания наша точка перезаписывается за ~1 кадр.
+                    -- Повторный вызов memory.lock на том же адресе лишь
+                    -- обновляет желаемое значение (цель двигается) и не
+                    -- сбрасывает удержание.
                     local lock_ok = pcall(memory.lock, LOCK_ID.silent, pid, aim_addr, aim_bytes)
                     if lock_ok then
                         state.silent_lock_addr = aim_addr
+                        state.silent_lock_mode = "lock"
                         armed_ok = true
                     else
-                        -- lock недоступен — пишем вручную с проверкой результата
                         state.silent_lock_addr = nil
-                        armed_ok = force_write_vec3(pid, aim_addr, aim_bytes)
+                        state.silent_lock_failed = true
                     end
-                else
-                    armed_ok = true
+                end
+                if not armed_ok then
+                    -- lock API недоступен/не сработал — прямая запись с
+                    -- проверкой чтения обратно (повторяется каждый кадр)
+                    armed_ok = force_write_vec3(write_fn, aim_addr, aim_bytes)
+                    if armed_ok then state.silent_lock_mode = "write" end
                 end
 
                 if armed_ok then
@@ -2433,11 +2530,7 @@ local function silent_tick(pid, base)
             end
         else
             release_silent_lock(pid)
-            if #state.entities == 0 then
-                state.silent_target_name = "no scan data"
-            else
-                state.silent_target_name = ""
-            end
+            state.silent_target_name = state.silent_no_reason or ""
             state.silent_target_ptr = nil
         end
  
@@ -2475,7 +2568,17 @@ local function silent_tick(pid, base)
                        on and MAGIC_BULLET_ON or MAGIC_BULLET_OFF, 1)
         end
     end)
-    if not ok then state.status = "Silent: " .. tostring(err) end
+    if not ok then
+        state.silent_err = tostring(err)
+        -- не затираем общий статус каждый кадр (OnUpdate и так на грани бюджета)
+        state._silent_err_timer = (state._silent_err_timer or 0) + 1
+        if state._silent_err_timer >= 60 then
+            state._silent_err_timer = 0
+            state.status = "Silent: " .. state.silent_err
+        end
+    else
+        state.silent_err = nil
+    end
 end
  
 local function dbg_refresh()
@@ -3573,7 +3676,15 @@ end
  
                 ui.separator()
                 ui.small("Target: " .. (state.silent_target_name ~= "" and state.silent_target_name or "none"))
-                ui.small(state.silent_armed and "ARMED (kernel lock ~10ms)" or "idle")
+                if state.silent_armed then
+                    ui.small("ARMED (" .. (state.silent_lock_mode == "write"
+                        and "direct write" or "kernel lock") .. ")")
+                else
+                    ui.small("idle")
+                end
+                if state.silent_lock_failed and not state.silent_armed then
+                    ui.small("memory.lock rejected by trainer - using direct writes")
+                end
                 ui.small("Shots: " .. state.silent_shots)
             end)
  
