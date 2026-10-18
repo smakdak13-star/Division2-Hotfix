@@ -2287,6 +2287,30 @@ local function read_world_aim(aim)
     }
 end
  
+-- Проверка, что байты в памяти уже равны желаемым (для дешёвой перелистовки lock'а)
+local function bytes_match(addr, want)
+    local got, len = read_bytes_table(addr, #want)
+    if len < #want then return false end
+    for i = 1, #want do
+        if got[i] ~= want[i] then return false end
+    end
+    return true
+end
+
+-- Запись точки прицела с проверкой результата: memory.write_bytes может вернуть
+-- false вместо исключения, поэтому молча «несработавшая» запись раньше
+-- выглядела как вооружённый silent-аим. Возвращает true только если запись
+-- подтверждена (или значение уже стоит в памяти).
+local function force_write_vec3(pid, addr, vals)
+    pcall(memory.write_bytes, pid, addr, vals)
+    if bytes_match(addr, vals) then return true end
+    for _ = 1, 8 do
+        pcall(memory.write_bytes, pid, addr, vals)
+        if bytes_match(addr, vals) then return true end
+    end
+    return false
+end
+
 local function release_silent_lock(pid)
     if state.silent_lock_addr then
         pcall(memory.unlock, LOCK_ID.silent)
@@ -2309,6 +2333,12 @@ local function silent_tick(pid, base)
         return
     end
  
+    -- Silent-aim работает только когда сканирование энтитетей активно:
+    -- без state.entities цель не находится никогда. Включаем скан сами.
+    if not state.esp_enabled then
+        state.esp_boxes = true
+    end
+
     local was_armed = state.silent_armed
  
     local ok, err = pcall(function()
@@ -2345,23 +2375,43 @@ local function silent_tick(pid, base)
                     state.silent_lock_addr = nil
                 end
  
-                local lock_ok = pcall(memory.lock, LOCK_ID.silent, pid, aim_addr, aim_bytes)
-                if lock_ok then
-                    state.silent_lock_addr = aim_addr
-                else
-                    for _ = 1, 10 do
-                        memory.write_bytes(pid, aim_addr, aim_bytes)
+                -- Если lock уже стоит на нужном адресе и в памяти лежит наша
+                -- точка — не перелистываем lock каждый кадр (перелист сбрасывает
+                -- удержание, и игровой raycast успевает перезаписать значение).
+                local already_locked = state.silent_lock_addr == aim_addr
+                    and bytes_match(aim_addr, aim_bytes)
+
+                local armed_ok = false
+                if not already_locked then
+                    local lock_ok = pcall(memory.lock, LOCK_ID.silent, pid, aim_addr, aim_bytes)
+                    if lock_ok then
+                        state.silent_lock_addr = aim_addr
+                        armed_ok = true
+                    else
+                        -- lock недоступен — пишем вручную с проверкой результата
+                        state.silent_lock_addr = nil
+                        armed_ok = force_write_vec3(pid, aim_addr, aim_bytes)
                     end
-                    state.silent_lock_addr = aim_addr
+                else
+                    armed_ok = true
                 end
- 
-                state.diag_last_write = { tp[1], tp[2], tp[3] }
-                state.silent_armed = true
-                state.silent_target_name = string.format("%s %.0fm", state.aim_part, target.dist)
+
+                if armed_ok then
+                    state.diag_last_write = { tp[1], tp[2], tp[3] }
+                    state.silent_armed = true
+                    state.silent_target_name = string.format("%s %.0fm", state.aim_part, target.dist)
+                else
+                    state.silent_armed = false
+                    state.silent_target_name = "write failed"
+                end
             end
         else
             release_silent_lock(pid)
-            state.silent_target_name = ""
+            if #state.entities == 0 then
+                state.silent_target_name = "no scan data"
+            else
+                state.silent_target_name = ""
+            end
             state.silent_target_ptr = nil
         end
  
