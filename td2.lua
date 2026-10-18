@@ -1,16 +1,3 @@
--- ============================================================
---  TD2 MERGED SCRIPT
---  Merge of org.lua + td2.lua with fixes.
---
---  NOTE ON BONE RIG:
---    This merge uses the NEWER humanoid rig (td2.lua indices).
---    If your build uses the OLDER rig (org.lua indices), swap the
---    PLAYER_HUMANOID / NPC_HUMANOID blocks below.
--- ============================================================
- 
--- ============================================================
---  SHARED RVA / OFF
--- ============================================================
 local RVA = {
     rlclient    = 0x6D755E0,
     viewmatrix  = 0x6D75A70,
@@ -42,21 +29,6 @@ local OFF = {
     hpPtr        = 0x7D0,
     health       = 0x5C,
     healthMax    = 0x60,
-    -- Armor lives INSIDE the HP component (hpPtr + off), not on the entity.
-    -- Values verified against TD2-Dumper (github.com/KushKoyote/TD2-Dumper):
-    --   OFF_agentarmor     = 0x254 / agentarmorMax   = 0x258 (players)
-    --   OFF_npcArmor       = 0x1C4 / npcArmorMax     = 0x1C8 (NPCs + props)
-    agentarmorInHp     = 0x254,
-    agentarmorMaxInHp  = 0x258,
-    npcArmorInHp       = 0x1C4,
-    npcArmorMaxInHp    = 0x1C8,
-    -- Weak-point props (boss backpacks / propane tanks) are NOT agents: they
-    -- use a lighter HealthComponent whose armor/shield fields sit at smaller
-    -- offsets inside the same hpPtr block. Reading these lets us detect when
-    -- a prop is still shielded (hits absorbed by armor -> hp never drops ->
-    -- silent aim would otherwise hold the lock forever).
-    wpArmor            = 0x30,
-    wpArmorMax         = 0x34,
     factionCtx   = 0x3E0,
  
     entityTypeInt = 0xC00,
@@ -70,8 +42,6 @@ local OFF = {
     npcTierOffset      = 0x184,
  
     name             = 0x438,
-    -- Local-player armor fields (verified on the LOCAL PLAYER structure only;
-    -- these offsets are meaningless on NPC entity pointers).
     agentarmor       = 0x254,
     agentarmorMax    = 0x258,
     weapPtr0         = 0x718,
@@ -91,7 +61,6 @@ local OFF = {
     combatAimMoveSpreadAdd     = 0x3840,
     combatAimLerpedMoveSpeed   = 0x3844,
  
-    weapTemplateDamageMin      = 0x40,
     weapTemplateDamageMax      = 0x44,
     weapTemplateDmgMultHead    = 0xA0,
     weapTemplateSwayMinH       = 0x2B8,
@@ -180,6 +149,329 @@ for _, n in ipairs({
     "destructible","prop","barrier","cover","sandbag","barricade",
     "generator","antenna","terminal","console","vending",
 }) do NON_COMBATANT_NAME_PARTS[#NON_COMBATANT_NAME_PARTS + 1] = n end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- УЯЗВИМЫЕ ТОЧКИ ДЛЯ КАЖДОГО ТИПА ВРАГА
+-- ═══════════════════════════════════════════════════════════════════════════
+
+-- Слабые места для боссов и особых врагов
+local WEAK_POINTS = {
+    -- Минитанк: ядро на спине (bone 33), сенсор (31), корпус (0)
+    [NPC_ARCHETYPE.MiniTank] = {
+        priority = {33, 31, 0},
+        fallback = "center"
+    },
+    -- Вархаунды: сенсорная панель (9), корпус (7)
+    [NPC_ARCHETYPE.BigDog] = {
+        priority = {9, 7, 2},
+        fallback = "center"
+    },
+    [NPC_ARCHETYPE.BigDogGrenadier] = {
+        priority = {9, 7, 2},
+        fallback = "center"
+    },
+    [NPC_ARCHETYPE.BigDogMinigun] = {
+        priority = {9, 7, 2},
+        fallback = "center"
+    },
+    [NPC_ARCHETYPE.BigDogFlamer] = {
+        priority = {9, 7, 2},
+        fallback = "center"
+    },
+    [NPC_ARCHETYPE.BigDogMortar] = {
+        priority = {9, 7, 2},
+        fallback = "center"
+    },
+    -- Турели: ядро в центре
+    [NPC_ARCHETYPE.Turret] = {
+        priority = {},
+        fallback = "center"
+    },
+    [NPC_ARCHETYPE.StaticTurret] = {
+        priority = {},
+        fallback = "center"
+    },
+    [NPC_ARCHETYPE.MGStationary] = {
+        priority = {},
+        fallback = "center"
+    },
+    -- Дроны: центр
+    [NPC_ARCHETYPE.DroneBomb] = {
+        priority = {},
+        fallback = "center"
+    },
+    [NPC_ARCHETYPE.AssaultDrone] = {
+        priority = {},
+        fallback = "center"
+    },
+    -- Хантеры: голова (приоритет)
+    [NPC_ARCHETYPE.Hunter] = {
+        priority = {8, 6, 4},
+        fallback = "head"
+    },
+    -- Тяжелые: голова/корпус
+    [NPC_ARCHETYPE.HeavyWeapons] = {
+        priority = {8, 6},
+        fallback = "head"
+    },
+    [NPC_ARCHETYPE.Tank] = {
+        priority = {8, 6, 4},
+        fallback = "chest"
+    },
+}
+
+local BONE_PROFILES = {
+    PLAYER_HUMANOID = {
+        indices     = {0, 2, 4, 7, 8, 10, 15, 16, 17, 45, 46, 47, 79, 80, 84, 87, 88, 92},
+        connections = {
+            {8,7},{7,4},{4,2},
+            {4,15},{15,16},{16,17},
+            {4,45},{45,46},{46,47},
+            {2,84},{84,79},{79,80},
+            {2,92},{92,87},{87,88},
+        },
+        aim_bone = 8, aim_bone_fallback = 7,
+        expected = 104, is_humanoid = true,
+    },
+    NPC_HUMANOID = {
+        indices     = {0, 2, 4, 6, 8, 9, 14, 15, 17, 44, 45, 47, 78, 79, 83, 86, 87, 91},
+        connections = {
+            {8,6},{6,4},{4,2},
+            {4,14},{14,15},{15,17},
+            {4,44},{44,45},{45,47},
+            {2,83},{83,78},{78,79},
+            {2,91},{91,86},{86,87},
+        },
+        aim_bone = 8, aim_bone_fallback = 8,
+        expected = 104, is_humanoid = true,
+    },
+    BIG_DOG = {
+        indices     = {0, 2, 7, 8, 9, 14, 15, 16, 25, 30, 31, 32, 33, 36, 37, 38, 39},
+        connections = {
+            {9,8},{8,7},{7,2},
+            {16,15},{15,14},{14,2},
+            {39,38},{38,37},{37,36},{36,2},
+            {33,32},{32,31},{31,30},{30,2},
+            {2,25},
+        },
+        aim_bone = 7, aim_bone_fallback = 2,
+        expected = 0, is_humanoid = false,
+    },
+    WARHOUND_GRENADIER = {
+        indices     = {0, 2, 7, 8, 9, 16, 17, 18, 27, 38, 39, 40, 41, 45, 46, 47, 48},
+        connections = {
+            {9,8},{8,7},{7,2},
+            {18,17},{17,16},{16,2},
+            {41,40},{40,39},{39,38},{38,2},
+            {48,47},{47,46},{46,45},{45,2},
+            {2,27},
+        },
+        aim_bone = 7, aim_bone_fallback = 2,
+        expected = 0, is_humanoid = false,
+    },
+    WARHOUND_MINIGUN = {
+        indices     = {0, 2, 7, 8, 9, 16, 17, 18, 27, 34, 35, 36, 37, 40, 41, 42, 44},
+        connections = {
+            {9,8},{8,7},{7,2},
+            {18,17},{17,16},{16,2},
+            {44,42},{42,41},{41,40},{40,2},
+            {37,36},{36,35},{35,34},{34,2},
+            {2,27},
+        },
+        aim_bone = 7, aim_bone_fallback = 2,
+        expected = 0, is_humanoid = false,
+    },
+    MINITANK = {
+        indices     = {0,1,7,8,13,14,15,16,22,23,28,29,31,33,35,37},
+        connections = {
+            {0,1},{1,7},{7,13},{1,8},{8,14},
+            {0,16},{16,22},{22,28},{16,23},{23,29},
+            {31,33},{33,35},{33,37},
+            {1,31},{16,31},
+        },
+        aim_bone = 31, aim_bone_fallback = 0,
+        expected = 40, is_humanoid = false,
+    },
+    ITEM = {
+        indices     = {},
+        connections = {},
+        aim_bone = nil, aim_bone_fallback = nil,
+        expected = 0, is_humanoid = false,
+    },
+    NO_SKELETON = {
+        indices     = {},
+        connections = {},
+        aim_bone = nil, aim_bone_fallback = nil,
+        expected = 0, is_humanoid = false,
+    },
+}
+
+local ARCHETYPE_PROFILE = {}
+for _, k in ipairs({
+    "Assault","Rusher","Thrower","Sniper","Controller","HeavyWeapons",
+    "Tank","Support","Medic","Engineer","RPG","Immobilizer","Bomber",
+    "Flamer","Disruptor","Shield","Hunter","LootGoblin","Bodyguard",
+    "Leader","Special","Civilian","RogueAgent","DroneOperator",
+}) do ARCHETYPE_PROFILE[NPC_ARCHETYPE[k]] = "NPC_HUMANOID" end
+for _, k in ipairs({
+    "BigDog","BigDogConvoy","BigDogFlamer","BigDogMortar","BigDogSmall",
+    "DogCompanion",
+}) do ARCHETYPE_PROFILE[NPC_ARCHETYPE[k]] = "BIG_DOG" end
+ARCHETYPE_PROFILE[NPC_ARCHETYPE.BigDogGrenadier] = "WARHOUND_GRENADIER"
+ARCHETYPE_PROFILE[NPC_ARCHETYPE.BigDogMinigun]   = "WARHOUND_MINIGUN"
+ARCHETYPE_PROFILE[NPC_ARCHETYPE.MiniTank] = "MINITANK"
+
+local LEGACY_BONE_NAMES = {
+    PLAYER_HUMANOID  = { head=8, chest=7, belly=4, root=2,
+                         l_shoulder=15, r_shoulder=45, l_arm=16, r_arm=46,
+                         l_hand=17, r_hand=47,
+                         l_knee=79, r_knee=87, l_heel=80, r_heel=88,
+                         l_toe=84, r_toe=92 },
+    NPC_HUMANOID     = { head=8, chest=6, belly=4, root=2,
+                         l_shoulder=14, r_shoulder=44, l_arm=15, r_arm=45,
+                         l_hand=17, r_hand=47,
+                         l_knee=78, r_knee=86, l_heel=79, r_heel=87,
+                         l_toe=83, r_toe=91 },
+    BIG_DOG            = { root=0, pelvis=2, chest=7, head=9, top=9 },
+    WARHOUND_GRENADIER = { root=0, pelvis=2, chest=7, head=9, top=9 },
+    WARHOUND_MINIGUN   = { root=0, pelvis=2, chest=7, head=9, top=9 },
+    MINITANK         = { head=31, chest=33, belly=33, root=0,
+                         l_top=31, r_top=35, l_front=1, r_front=16,
+                         middle=33, top=37 },
+    ITEM             = { root=0 },
+}
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- УЛУЧШЕННЫЙ ПОИСК УЯЗВИМОЙ ТОЧКИ
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local function get_weak_point(e)
+    if not e then return nil end
+    
+    local pname = profile_name_for(e)
+    local bt = LEGACY_BONE_NAMES[pname] or LEGACY_BONE_NAMES.NPC_HUMANOID
+    local bones = e.bones
+    
+    -- 1. Если враг почти мёртв (<15% HP) — всегда целимся в голову для добивания
+    if e.hp_max and e.hp_max > 0 and (e.hp / e.hp_max) < 0.15 then
+        if bt.head and bones and bones[bt.head] then
+            return bones[bt.head]
+        end
+    end
+    
+    -- 2. Проверяем специфичные уязвимые точки для боссов/техники
+    if e.archetype and WEAK_POINTS[e.archetype] then
+        local wp = WEAK_POINTS[e.archetype]
+        -- Пробуем все приоритетные кости
+        for _, bone_id in ipairs(wp.priority) do
+            if bones and bones[bone_id] then
+                return bones[bone_id]
+            end
+        end
+        -- Фолбэк
+        if wp.fallback == "head" and bt.head and bones and bones[bt.head] then
+            return bones[bt.head]
+        elseif wp.fallback == "chest" and bt.chest and bones and bones[bt.chest] then
+            return bones[bt.chest]
+        elseif wp.fallback == "center" then
+            return e.pos
+        end
+    end
+    
+    -- 3. Для людей — по настройке
+    if pname == "NPC_HUMANOID" or pname == "PLAYER_HUMANOID" then
+        if state.aim_part == "head" and bt.head and bones and bones[bt.head] then
+            return bones[bt.head]
+        end
+        if state.aim_part == "chest" and bt.chest and bones and bones[bt.chest] then
+            return bones[bt.chest]
+        end
+        if state.aim_part == "pelvis" and bt.belly and bones and bones[bt.belly] then
+            return bones[bt.belly]
+        end
+        -- fallback: голова
+        if bt.head and bones and bones[bt.head] then return bones[bt.head] end
+        if bt.chest and bones and bones[bt.chest] then return bones[bt.chest] end
+    end
+    
+    -- 4. Для техники без специфичных точек
+    if pname == "BIG_DOG" or pname == "WARHOUND_GRENADIER" or pname == "WARHOUND_MINIGUN" then
+        if bones and bones[9] then return bones[9] end  -- сенсор
+        if bones and bones[7] then return bones[7] end  -- корпус
+        if bones and bones[2] then return bones[2] end  -- корень
+    elseif pname == "MINITANK" then
+        if bones and bones[33] then return bones[33] end  -- ядро
+        if bones and bones[31] then return bones[31] end  -- сенсор
+        if bones and bones[0] then return bones[0] end    -- корень
+    end
+    
+    -- 5. Финальный fallback — позиция энтити
+    return e.pos
+end
+
+-- Замена aim_point_for
+local function aim_point_for(e)
+    if not e then return nil end
+    local wp = get_weak_point(e)
+    if wp then return wp end
+    return { e.pos[1], e.pos[2], e.pos[3] }
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- УЛУЧШЕННЫЙ ПОИСК ЦЕЛИ С ПРИОРИТИЗАЦИЕЙ
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local function find_silent_target(entities, viewproj, wr)
+    if not viewproj then return nil end
+    wr = normalize_window_rect(wr)
+    if not wr then return nil end
+    local w = wr[1]
+    if not w or not w.width or w.width <= 0 then return nil end
+    local cx, cy = w.x + w.width / 2, w.y + w.height / 2
+    
+    local best, best_score = nil, -math.huge
+    for _, e in ipairs(entities) do
+        if not e.is_player and is_silent_target(e) and e.dist <= state.silent_max_dist then
+            local tp = get_weak_point(e)
+            if tp then
+                local sx, sy = world_to_screen(tp, viewproj, w)
+                if sx and sy then
+                    local dx, dy = sx - cx, sy - cy
+                    local dist_px = math.sqrt(dx * dx + dy * dy)
+                    if dist_px < state.silent_fov then
+                        local prio = aimbot_priority(e)
+                        
+                        -- Бонус за уязвимость (есть скелет/специфичная точка)
+                        local weak_bonus = 0
+                        if e.bones and next(e.bones) ~= nil then
+                            weak_bonus = 5000
+                        end
+                        
+                        -- Бонус за низкий HP (добивание)
+                        local hp_bonus = 0
+                        if e.hp_max and e.hp_max > 0 then
+                            local hp_ratio = e.hp / e.hp_max
+                            if hp_ratio < 0.3 then hp_bonus = 3000 end
+                            if hp_ratio < 0.15 then hp_bonus = 6000 end
+                        end
+                        
+                        -- Бонус за боссов (приоритет)
+                        local boss_bonus = 0
+                        if e.tier == NPC_THREAT_TIER.Boss then boss_bonus = 8000 end
+                        if e.tier == NPC_THREAT_TIER.Heavy then boss_bonus = 4000 end
+                        
+                        local score = prio * 10000 - dist_px + weak_bonus + hp_bonus + boss_bonus
+                        if score > best_score then
+                            best_score = score
+                            best = e
+                        end
+                    end
+                end
+            end
+        end
+    end
+    return best
+end
  
 local function name_is_blacklisted(name)
     if not name or name == "" then return false end
@@ -318,336 +610,6 @@ local ALL_BONE_IDS_SPARSE = {
     36, 37, 38, 39, 40, 41, 42, 44, 45, 46, 47, 48,
     78, 79, 80, 83, 84, 86, 87, 88, 91, 92,
 }
-
--- Weak-point (backpack / propane / turret battery) entities: in TD2 these are
--- NOT bones of the boss rig. They spawn as separate lightweight entities.
--- Detection rules (in order):
---   1. explicit destructible archetypes (DestructibleProp/Trap/Hive);
---   2. entity name matches a known prop keyword;
---   3. GADGET-type entity whose descriptor chain cannot be resolved to a
---      real archetype (player skill gadgets ALWAYS resolve to a known
---      archetype id; boss props keep archetype Unset(0) or nil);
---   4. NEW fallback: any entity that has NO readable descriptor chain at all
---      but DOES own a valid HP component with hp_max in a sane range. This
---      catches props even when entityTypeInt@0xC00 reads as garbage/0, which
---      is why weak points previously were never found.
--- IMPORTANT: the keywords below are matched as LOWERCASE SUBSTRINGS against
--- the entity name.  That is why short/ambiguous fragments like "gas", "tank",
--- "med", "ammo", "car" used to misfire constantly: an NPC named e.g.
--- "StaticTurretBase" contains "turret"... but worse, ANY prop whose name
--- merely CONTAINS one of those fragments (or a humanoid enemy archetype that
--- shares the fragment) got classified as a weak point and the aim wrote the
--- crosshair onto its feet.  Every keyword is now either a full distinctive
--- word or an unambiguous compound; matching additionally requires the hit to
--- be a WORD BOUNDARY start (see wp_name_has_keyword) so "tanker"/"target" no
--- longer match "tank".
-local WEAK_POINT_NAME_HINTS = {
-    "backpack", "propane", "canister", "cylinder",
-    "explosive", "weakpoint", "weak_point", "weak point", "vulnerable",
-    "battery", "reactor", "fuel",
-    "barrel", "oxygen", "acetylene", "valve",
-    "generator", "transformer", "pylon", "charge",
-    -- removed ambiguous fragments: "gas" (matches "gasmask"), "tank"
-    -- (matches "tanker"), "med" (matches "medium"), "ammo" alone is kept
-    -- only as "ammoload"/"ammo_" compounds below, "car" (matches "cargo"),
-    -- "core" (matches "score"/"arcade"), "vent", "console", "junction",
-    -- "support", "supply", "loader", "purifier", "heal" -> see tiers
-}
-for _, extra in ipairs({ "ammoload", "ammo_crate", "fuel tank", "fueltank",
-                         "gas can", "gascan", "propane tank" }) do
-    WEAK_POINT_NAME_HINTS[#WEAK_POINT_NAME_HINTS + 1] = extra
-end
-
--- IMPORTANT: Trap / Hive are PLAYER SKILL deployments (Hunter's hive, trap
--- skill). Marking them as weak points made silent aim lock onto our own
--- deployed skills lying around the map. Only genuinely environmental
--- destructibles stay here; enemy-carried gear is matched via name keywords.
-local WEAK_POINT_ARCHETYPES = {}
-for _, k in ipairs({ "DestructibleProp" }) do
-    WEAK_POINT_ARCHETYPES[NPC_ARCHETYPE[k]] = true
-end
-
--- Per-archetype weak-point keyword table (The Division 2).
--- Bosses / named enemies on Legendary + Raid difficulty carry destructible
--- gadgets that must be destroyed before their armor becomes breakable:
---   True Son bosses (General Cross, "Gator", Commander Hyena crew leaders):
---       healing backpacks ("backpack", "purifier", "med")
---   Cleaners leaders (Lucas "Sadie" Oliveira, Pest engineers):
---       flamethrower fuel tanks ("flam", "fuel", "tank", "propane")
---   Black Tusk elite / Exo supports (Riley's Washington, BNT task force):
---       exo backpacks / generator packs ("generator", "exo", "battery")
---   Dark Zone / Manhunt raid props:
---       explosive barrels & car traps ("barrel", "explosive", "car")
--- Keys are matched as lowercase substrings against the entity NAME of a
--- gadget/prop entity; a hit boosts its priority tier and tags it with a
--- human-readable kind so silent aim locks the RIGHT prop first.
-local WEAK_POINT_KEYWORD_TIERS = {
-    -- tier A: heals/shields the boss -> kill FIRST
-    { tier = 1, label = "HEALER",
-      keys = { "backpack", "purifier", "medkit", "med_bag", "heal",
-               "dronebay", "supply", "ammoload", "ammo_crate" } },
-    -- tier B: big damage source (flamethrower tank, exo pack, generator)
-    { tier = 2, label = "FUEL",
-      keys = { "flamethrower", "fuel", "propane", "gascan", "gas_can",
-               "canister", "cylinder", "acetylene", "oxygen", "barrel",
-               "tank", "generator", "reactor", "battery", "transformer" } },
-    -- tier C: anything else explicitly destructible/explosive
-    { tier = 3, label = "EXPLOSIVE",
-      keys = { "explosive", "weakpoint", "weak_point", "weak point",
-               "vulnerable", "charge", "hive", "trap" } },
-}
-
--- Word-boundary keyword matcher.  ln:find(k, 1, true) matches ANYWHERE inside
--- a word, which is why "tank" used to hit names like "TankerNPC" /
--- "StaticTurret..." style props and the aim locked onto random objects near
--- NPC feet.  Here a keyword only counts when it starts at a non-alphanumeric
--- boundary (start of name, after _, space, or any punctuation) AND ends at a
--- non-alphanumeric boundary too ("tank" hits "boss_tank_01" but not "tanker").
-local function wp_name_has_keyword(ln, k)
-    local from = 1
-    while true do
-        local s, e = ln:find(k, from, true)
-        if not s then return false end
-        local before = (s == 1) and "" or ln:sub(s - 1, s - 1)
-        local after  = (e == #ln) and "" or ln:sub(e + 1, e + 1)
-        local ok_l = (before == "") or not before:match("%w")
-        local ok_r = (after == "")  or not after:match("%w")
-        -- allow '_' as a separator on both sides (snake_case entity names)
-        if before ~= "_" and before:match("%w") then ok_l = false end
-        if after ~= "_" and after:match("%w") then ok_r = false end
-        if ok_l and ok_r then return true end
-        from = s + 1
-    end
-end
-
-local function classify_weak_point(e)
-    -- returns tier, label  (tier 0 = no keyword match but still a prop)
-    local name = e.ent_name
-    if name and name ~= "" then
-        local ln = lc(name)
-        -- check tiers in priority order; "barrel" is BOTH a fuel container and
-        -- an explosive drum -> the higher-priority tier (lower number) wins so
-        -- the scan stays deterministic regardless of key iteration order.
-        for _, grp in ipairs(WEAK_POINT_KEYWORD_TIERS) do
-            for _, k in ipairs(grp.keys) do
-                if wp_name_has_keyword(ln, k) then return grp.tier, grp.label end
-            end
-        end
-    end
-    return 0, "PROP"
-end
-
--- The entity position in TD2 is the object's ORIGIN, which for many props is
--- at their FEET (e.g. a propane "tank" prop whose origin sits on the ground
--- under it). Silent aim must write the actual damage volume center instead.
---
--- IMPORTANT: hp_max is HIT POINTS, not physical meters — the previous version
--- treated it as a box height ("lift = 0.55 * hp_max"), which produced garbage
--- offsets (a 900-HP tank got clamped to the max, a 3-HP prop got the min) and
--- aimed at random spots near the ground / NPC legs. Now the vertical lift is
--- derived ONLY from the prop kind (name keywords), with fixed sane ranges:
---   * floor-standing cylinders/tanks/generators: body center ~0.7 m up;
---   * wall/console/pylon objects: ~1.0 m;
---   * vehicles: ~0.8 m;
---   * small carried props (backpacks are usually read at torso height): no
---     lift unless clearly a ground prop;
---   * unknown props: default 0.5 m (origin of most gadgets is already the
---     volume center, so a small lift is safe).
--- state.wp_aim_lift is a user-adjustable multiplier (UI slider, default 1.0)
--- so the exact height can be calibrated in-game via the yellow crosshair
--- marker without editing the script.
-local WP_LIFT_TABLE = {
-    -- { min = lower bound of lift, max = upper bound, def = default lift }
-    CYLINDER = { min = 0.20, max = 1.60, def = 0.70 }, -- tank/barrel/canister/propane
-    WALL     = { min = 0.20, max = 2.20, def = 1.00 }, -- generator/console/reactor/pylon
-    VEHICLE  = { min = 0.20, max = 1.80, def = 0.80 }, -- car/truck/van
-    SMALL    = { min = 0.00, max = 0.60, def = 0.00 }, -- backpack/medkit/ammo (torso pos)
-    DEFAULT  = { min = 0.00, max = 1.50, def = 0.50 },
-}
-
-local WP_LIFT_KEYWORDS = {
-    { kind = "CYLINDER", keys = { "tank", "barrel", "canister", "cylinder",
-        "propane", "gascan", "acetylene", "oxygen", "flamethrower", "fuel" } },
-    { kind = "WALL", keys = { "generator", "transformer", "pylon",
-        "battery", "reactor" } },
-    { kind = "VEHICLE", keys = { "truck", "van", "sedan", "suv",
-        "vehicle", "bus" } },
-    { kind = "SMALL", keys = { "backpack", "medkit", "heal", "supply",
-        "ammoload", "ammo_crate", "purifier", "dronebay" } },
-}
-
-local function weak_point_lift_kind(name)
-    if not name or name == "" then return "DEFAULT" end
-    local ln = lc(name)
-    for _, grp in ipairs(WP_LIFT_KEYWORDS) do
-        for _, k in ipairs(grp.keys) do
-            if wp_name_has_keyword(ln, k) then return grp.kind end
-        end
-    end
-    return "DEFAULT"
-end
-
--- Bone-derived aim point (PREFERRED): many TD2 "props" (boss backpacks, exo
--- packs, mounted gear) actually expose a small bone/collider hierarchy via
--- the same bonesBase/boneArray chain as agents. The average of their readable
--- bones is the true damage-volume center — no guesswork about feet origins.
--- Returns nil when the prop has no usable bones (then we fall back to the
--- name-keyword lift heuristic below).
-local function wp_bone_center(e)
-    local b = e.bones
-    if type(b) ~= "table" then return nil end
-    local n, sx, sy, sz = 0, 0, 0, 0
-    for _, p in pairs(b) do
-        if p and is_finite(p[1]) and is_finite(p[2]) and is_finite(p[3]) then
-            n = n + 1
-            sx = sx + p[1]; sy = sy + p[2]; sz = sz + p[3]
-        end
-    end
-    if n == 0 then return nil end
-    return { sx / n, sy / n, sz / n }
-end
-
-local function weak_point_aim_offset(e)
-    local kind = weak_point_lift_kind(e.ent_name)
-    local cfg = WP_LIFT_TABLE[kind] or WP_LIFT_TABLE.DEFAULT
-    local base = cfg.def
-    -- carried/healing props sit ON the boss: the entity origin of a backpack
-    -- is typically already at torso height -> never lift those blindly
-    if kind == "SMALL" then base = 0.0 end
-    local mult = tonumber(state.wp_aim_lift) or 1.0
-    local dy = base * mult
-    if dy < cfg.min then dy = cfg.min end
-    if dy > cfg.max then dy = cfg.max end
-    return dy
-end
-
-local function aim_point_for_weak_point(e)
-    local p = e.pos
-    -- If the prop exposes any bones, use their average directly and ignore
-    -- the slider entirely: the bone center IS the hit volume, lifting it
-    -- further would put the ray above the object (missed shots).
-    local bc = wp_bone_center(e)
-    if bc then return bc end
-    return { p[1], p[2] + weak_point_aim_offset(e), p[3] }
-end
-
-local function name_looks_like_weak_point(name)
-    if not name or name == "" then return false end
-    local ln = lc(name)
-    for _, hint in ipairs(WEAK_POINT_NAME_HINTS) do
-        if wp_name_has_keyword(ln, hint) then return true end
-    end
-    for _, grp in ipairs(WEAK_POINT_KEYWORD_TIERS) do
-        for _, k in ipairs(grp.keys) do
-            if wp_name_has_keyword(ln, k) then return true end
-        end
-    end
-    return false
-end
-
--- CRITICAL GUARD: a real agent (humanoid soldier, dog, boss) is NEVER a weak
--- point, no matter what its name contains.  Previous versions matched name
--- keywords against NPC names too ("AssaultTank", "Medic", "SupportBackpack"
--- style names), which made silent aim treat the whole AGENT as a prop: the
--- aim point became entityPos + small lift = the NPC's FEET/legs.  That is the
--- exact bug reported ("aims at legs / who knows where").  Only entities whose
--- type is GADGET/unknown (i.e. NOT ENTITY_TYPE_NPC / PLAYER) may qualify via
--- name heuristics; explicit destructible archetypes still pass.
-local WEAK_POINT_AGENT_TYPES = {}
-for _, t in ipairs({ ENTITY_TYPE_NPC, ENTITY_TYPE_PLAYER }) do
-    WEAK_POINT_AGENT_TYPES[t] = true
-end
-
-local function is_agent_entity(e)
-    if WEAK_POINT_AGENT_TYPES[e.entity_type_int] then return true end
-    if e.entity_type ~= nil and WEAK_POINT_AGENT_TYPES[e.entity_type] then
-        return true
-    end
-    -- readable combat archetype id => it is an agent, not a loose prop
-    if e.archetype ~= nil and e.archetype > 0
-       and ARCHETYPE_NAME_BY_ID[e.archetype] then
-        return true
-    end
-    return false
-end
-
-local function is_weak_point_entity(e)
-    if not e or e.is_player then return false end
-    -- props are never "downed" agents; keep the guard anyway so corpses of
-    -- NPCs can't be mistaken for weak points via the fallback rules below
-    if e.is_downed then return false end
-    if e.archetype ~= nil and WEAK_POINT_ARCHETYPES[e.archetype] then
-        return true
-    end
-    -- AGENT GUARD: real NPCs/players (type 5/6 or readable combat archetype)
-    -- must NEVER be classified as weak points by name heuristics.  Without
-    -- this, a boss named "...Tank..." or a medic with a backpack in its name
-    -- became a "prop", aim_point_for fell back to entityPos+lift and silent
-    -- aim put the crosshair on the NPC's legs — exactly the misaim that was
-    -- reported.
-    if is_agent_entity(e) then return false end
-    if name_looks_like_weak_point(e.ent_name) then return true end
-    if e.entity_type_int == ENTITY_TYPE_GADGET then
-        -- Gadget is the type that TD2 assigns to player skill deployments
-        -- (turrets, hives, traps, backups) as well as to environmental props.
-        -- Never classify a gadget with NO HP component and NO weak-point name
-        -- as a shootable weak point: those are invisible skill markers lying
-        -- around the map and used to steal the silent-aim lock.
-        if e.archetype == nil or e.archetype == NPC_ARCHETYPE.Unset then
-            if e.has_hp or name_looks_like_weak_point(e.ent_name) then
-                return true
-            end
-        end
-    elseif e.archetype == nil then
-        -- No readable descriptor chain. If it also owns a valid HP component
-        -- it is a destructible prop, not an agent (agents always expose an
-        -- archetype through NpcAgentDescriptor).
-        if e.has_hp and e.hp_max > 0 and e.hp_max <= 2000000 then
-            return true
-        end
-    end
-    return false
-end
-
--- Final safety gate used by the SILENT AIM path only (ESP may still draw every
--- prop).  A weak point must be either a real gadget/prop entity type OR expose
--- no agent archetype, AND must not be positioned exactly like a standing NPC
--- we can see bones for.  If an entity passed the name heuristics but actually
--- has a full skeleton with readable bones, it IS an agent -> refuse to treat
--- it as a prop so we never aim at someone's legs.
-local function silent_accepts_weak_point(e)
-    if not is_weak_point_entity(e) then return false end
-    local b = e.bones
-    if type(b) == "table" then
-        local n = 0
-        for _ in pairs(b) do n = n + 1 end
-        -- real agents expose dozens of bones; destructible props are probed
-        -- with the small sparse set (see get_bone_ids_for_entity, cap
-        -- WP_MAX_PROP_BONES). If we see MORE than that cap, this "prop" is a
-        -- full-skeleton NPC -> never aim at its entityPos (legs); let the
-        -- normal head/body path handle it instead.
-        if n > WP_MAX_PROP_BONES then return false end
-    end
-    return true
-end
-
--- A weak point counts as a live silent-aim target while it still has health.
--- Props with an armor/shield layer are NOT filtered out here (a wrong armor
--- offset would make every prop look shielded and the aimbot would never see
--- them); instead the stall watchdog in wp_watchdog releases the lock when HP
--- refuses to drop while we keep firing at the prop.
-local function is_alive_weak_point(e)
-    if not is_weak_point_entity(e) then return false end
-    if not e.has_hp then return true end          -- no HP info: assume shootable
-    if e.hp <= 0 then return false end
-    -- NOTE: we intentionally do NOT skip props that still have armor/shield.
-    -- Reading a wrong offset would make every prop look "shielded" and the
-    -- aimbot would silently refuse to target any of them (this was the exact
-    -- reason weak points were never found before). Shielded props are handled
-    -- by the stall watchdog instead: if HP refuses to drop while we keep
-    -- firing, the prop is temporarily ignored and the aim moves on.
-    return true
-end
  
 local ALL_BONE_IDS_0_90 = {}
 for i = 0, 90 do ALL_BONE_IDS_0_90[#ALL_BONE_IDS_0_90 + 1] = i end
@@ -665,15 +627,6 @@ local BATCH_MAX_BYTES   = 4096
 local TRANSITION_FRAMES       = 120
 local MIN_OVERLAP_CHECK_COUNT = 4
 local SILENT_LOCK_DELTA       = 2.0
--- pixels of "screen distance" bonus for the already-locked weak point, so the
--- aim keeps holding the same prop until it is destroyed instead of flitting
--- between several backpacks/tanks that are closer to the crosshair
-local SILENT_WP_STICK_BONUS   = 500.0
--- watchdog: if the locked prop's HP did not move while we kept firing at it,
--- release the lock for a while (invulnerable / wrong hit surface) so silent
--- aim can move on to other weak points or the head
-local WP_STALL_LIMIT          = 3
-local WP_IGNORE_SECONDS       = 8.0
  
 local LOCK_ID = {
     silent     = 10001,
@@ -777,19 +730,8 @@ local function profile_name_for(e)
 end
  
 local state
-
--- Weak-point props are read with a small sparse bone set (see
--- get_bone_ids_for_entity); the >=5-bone heuristic below must only reject
--- FULL agent skeletons, so the cap has to stay above that probe size.
-local WP_MAX_PROP_BONES = 20
-
--- Forward declarations (definitions further below). Needed so that the
--- weak-point helpers can be used by functions defined earlier in the file.
-local aim_point_for
-local should_show
  
 local function get_color(e)
-    if is_weak_point_entity(e) then return {255, 200, 0} end
     if e.is_player then
         if e.relation == "hostile" then return {255, 140, 25} end
         return {51, 102, 255}
@@ -801,46 +743,14 @@ local function get_color(e)
     return {180, 80, 255}
 end
  
--- Kept for diagnostics/back-compat; the actual two-stage selection happens
--- inside find_silent_target (weak points vs. regular targets are collected
--- separately and never mixed into one score).
 local function aimbot_priority(e)
-    if is_weak_point_entity(e) then return 2 end
-    if e.entity_type_int == ENTITY_TYPE_GADGET then return 1 end
-    return 0
+    if e.entity_type == ENTITY_TYPE_GADGET then return 1 end
+    return 3
 end
  
 local function is_silent_target(e)
     if not e or e.is_player or e.is_downed then return false end
-
-    -- weak-point props: lightweight gadget entities. They classify as
-    -- "friendly" via the normal pipeline, so they must bypass relation /
-    -- archetype filtering here, otherwise the aimbot never sees them.
-    -- IMPORTANT: only accept it as a PROP when silent_accepts_weak_point
-    -- confirms there is no real skeleton on it; otherwise fall through to the
-    -- regular NPC path below so we aim at head/chest bones instead of the
-    -- entity origin (which sits at the NPC's feet -> shots into legs).
-    if is_weak_point_entity(e) and silent_accepts_weak_point(e) then
-        if not state.weak_points_first then return false end
-        if not is_alive_weak_point(e) then return false end
-        -- props whose HP refused to drop while locked are temporarily ignored
-        -- (likely invulnerable / wrong hit position), so the aimbot can move
-        -- on to other weak points or the head instead of stalling forever
-        local until_t = state.wp_ignored[e.entity_ptr]
-        if until_t and os.clock() < until_t then return false end
-        return true
-    end
-    -- NOTE: player-deployed gadgets (turrets/skills, ARCHETYPE_IS_GADGET) are
-    -- intentionally NOT silent targets anymore; only real NPC types pass the
-    -- filter below. Boss backpacks/tanks still reach this function through
-    -- the is_weak_point_entity branch above.
-    if e.is_summoned then
-        if e.relation == "hostile" then
-            if not state.silent_target_summon then return false end
-        else
-            return false
-        end
-    end
+    if e.is_summoned and not state.silent_target_summon then return false end
     if e.entity_type ~= ENTITY_TYPE_NPC then return false end
  
     local pname = profile_name_for(e)
@@ -853,9 +763,7 @@ local function is_silent_target(e)
  
     if pname == "TURRET" then return true end
     if pname == "ITEM" then return false end
-    -- own deployed skills/gadgets are never valid targets (their relation is
-    -- friendly/neutral and the check below catches them; hostile enemy
-    -- summons stay targetable when the toggle is on)
+    if e.is_summoned and e.relation ~= "hostile" then return false end
     if e.relation == "friendly" or e.relation == "neutral" then return false end
  
     if e.archetype ~= nil then
@@ -910,6 +818,7 @@ state = {
     window_rect       = nil,
     wr_timer          = 0,
     attach_timer      = 0,
+    process_check_timer = 0,
  
     _last_arr_ptr      = 0,
     _last_count        = 0,
@@ -929,8 +838,6 @@ state = {
  
     aim_part        = "head",
     target_gadgets  = true,
-    weak_points_first = true,
-    wp_aim_lift     = 1.0,   -- multiplier for weak-point vertical aim lift (m)
  
     silent_enabled       = false,
     silent_target_summon = true,
@@ -944,20 +851,6 @@ state = {
     silent_armed         = false,
     silent_seen_gen      = 0,
     silent_target_ptr    = nil,
-    wp_seen_count        = 0,
-    wp_destroyed         = 0,
-    wp_lock_start_hp     = 0,
-    wp_lock_ptr          = nil,
-    wp_lock_prev_hp      = nil,
-    wp_lock_stall        = 0,
-    wp_last_shots        = 0,
-    wp_ignore_until      = 0,
-    wp_ignored           = {},
-    last_shot_rounds     = 0,
-    last_shot_aim        = nil,
-    last_shot_pos        = nil,
-    last_shot_name       = "",
-    hit_debug            = "",
  
     diag_last_write = nil,
  
@@ -1038,29 +931,73 @@ local PERSIST_KEYS = {
     "esp_show_faction", "esp_desc_test", "esp_max_dist", "esp_show_silent_fov",
     "silent_enabled", "silent_target_summon", "silent_fov",
     "silent_max_dist", "aim_part",
-    "target_gadgets", "weak_points_first", "wp_aim_lift",
+    "target_gadgets",
     "no_recoil", "no_spread", "magic_bullet", "no_sway", "move_speed",
     "extended_range", "instant_reload",
     "accuracy_locked", "fast_fire", "high_headshot_dmg", "headshot_dmg_multiplier",
     "rpm_enabled", "rpm_value", "time_mode", "master_enabled",
 }
  
+-- Config IO is deliberately strict: malformed/stale values must not change
+-- the runtime type of a state field or silently report a successful save.
 local function write_cfg_to_memory()
-    if not config then return false, "Config API unavailable" end
+    if not config or type(config.set) ~= "function" then
+        return false, "Config API unavailable"
+    end
+
+    local failures = {}
     for _, k in ipairs(PERSIST_KEYS) do
         local v = state[k]
-        if type(v) == "boolean" or type(v) == "number" or type(v) == "string" then
-            pcall(config.set, CFG_PREFIX .. k, v)
+        local tv = type(v)
+        if tv == "boolean" or tv == "number" or tv == "string" then
+            local ok, err = pcall(config.set, CFG_PREFIX .. k, v)
+            if not ok then
+                failures[#failures + 1] = k .. ": " .. tostring(err)
+            end
         end
+    end
+
+    if #failures > 0 then
+        return false, table.concat(failures, "; ")
     end
     return true
 end
  
 local function read_cfg_into_state()
-    if not config then return false, "Config API unavailable" end
+    if not config or type(config.get) ~= "function" then
+        return false, "Config API unavailable"
+    end
+
+    local rejected = {}
     for _, k in ipairs(PERSIST_KEYS) do
         local ok, v = pcall(config.get, CFG_PREFIX .. k, nil)
-        if ok and v ~= nil then state[k] = v end
+        if ok and v ~= nil then
+            local expected = type(state[k])
+            local actual = type(v)
+            local valid = actual == expected
+
+            -- Reject NaN and infinities; these can poison calculations and UI.
+            if valid and actual == "number" then
+                valid = (v == v and v ~= math.huge and v ~= -math.huge)
+            end
+
+            -- Only recognized time presets are accepted from persisted config.
+            if valid and k == "time_mode" then
+                valid = (v == "normal" or v == "noon" or v == "night")
+            end
+
+            if valid then
+                state[k] = v
+            else
+                rejected[#rejected + 1] = k
+            end
+        elseif not ok then
+            rejected[#rejected + 1] = k
+        end
+    end
+
+    if #rejected > 0 then
+        return true, "Ignored invalid config values: " .. table.concat(rejected, ", ")
     end
     return true
 end
@@ -1076,12 +1013,25 @@ local function cfg_save()
 end
  
 local function cfg_load()
-    local ok, err = read_cfg_into_state()
-    if not ok then state.status = "Load failed: " .. tostring(err); return end
+    local ok, detail = read_cfg_into_state()
+    if not ok then state.status = "Load failed: " .. tostring(detail); return end
+
+    local apply_failures = {}
     for k, fn in pairs(ONE_SHOT_APPLIES) do
-        if state[k] then pcall(fn) end
+        if state[k] then
+            local applied, err = pcall(fn)
+            if not applied then
+                apply_failures[#apply_failures + 1] = k .. ": " .. tostring(err)
+            end
+        end
     end
-    state.status = "Config loaded"
+
+    local messages = {}
+    if detail then messages[#messages + 1] = detail end
+    if #apply_failures > 0 then
+        messages[#messages + 1] = "Apply errors: " .. table.concat(apply_failures, "; ")
+    end
+    state.status = (#messages > 0) and table.concat(messages, " | ") or "Config loaded"
 end
  
 local function cfg_overwrite()
@@ -1162,21 +1112,45 @@ local function pad_to(t, n)
 end
  
 local function read_bytes_table(addr, n)
-    local raw = memory.read_bytes(state.pid, addr, n)
+    -- Keep failed and partial reads visibly partial; padding can disguise a
+    -- failed memory read as valid zero-filled data.
+    if type(addr) ~= "number" or addr <= 0
+       or type(n) ~= "number" or n < 1 or n > BATCH_MAX_BYTES then
+        return {}, 0
+    end
+    if type(state.pid) ~= "number" or state.pid <= 0
+       or not memory or type(memory.read_bytes) ~= "function" then
+        return {}, 0
+    end
+
+    local ok, raw = pcall(memory.read_bytes, state.pid, addr, n)
+    if not ok then return {}, 0 end
     local t, len = to_byte_table(raw)
-    if len < n then pad_to(t, n) end
+    if len > n then
+        for i = #t, n + 1, -1 do t[i] = nil end
+        len = n
+    end
     return t, len
 end
- 
+
 local function read_uint(addr, n)
-    local data = read_bytes_table(addr, n)
+    local data, len = read_bytes_table(addr, n)
+    if len < n then return 0 end
     return uint_from(data, 1, n)
 end
- 
+
 local function write_uint(addr, value, n)
+    if type(addr) ~= "number" or addr <= 0
+       or type(value) ~= "number" or not is_finite(value)
+       or type(n) ~= "number" or n < 1 or n > 8
+       or type(state.pid) ~= "number" or state.pid <= 0
+       or not memory or type(memory.write_bytes) ~= "function" then
+        error("invalid memory write arguments")
+    end
     local bytes = {}
+    value = math.floor(value)
     for i = 1, n do bytes[i] = value % 256; value = math.floor(value / 256) end
-    memory.write_bytes(state.pid, addr, bytes)
+    return memory.write_bytes(state.pid, addr, bytes)
 end
  
 local function is_hostile_archetype(a)
@@ -1236,10 +1210,6 @@ end
 local function classify_pipeline(e, ctx)
     local etype = e.entity_type_int
     if etype == ENTITY_TYPE_NPC or etype == ENTITY_TYPE_GADGET then
-        -- destructible weak-point props (boss backpacks / fuel tanks) often
-        -- carry the boss's faction id; without this early-exit the faction
-        -- check below marks them "friendly" and silent aim never sees them
-        if is_weak_point_entity(e) then return "hostile" end
         if e.tier_valid and e.tier == NPC_THREAT_TIER.NonThreat then
             return "friendly"
         end
@@ -1301,13 +1271,13 @@ local function batch_read_chunked(pid, stride, addrs)
         for k = i, last do sub[#sub + 1] = addrs[k] end
         local expect = #sub * stride
  
-        local data, dlen = to_byte_table(memory.batch_read(pid, stride, sub))
-        if dlen == 0 then
-            for _ = 1, expect do out[#out + 1] = 0 end
-        else
-            if dlen < expect then pad_to(data, expect) end
-            for b = 1, expect do out[#out + 1] = data[b] end
-        end
+        local call_ok, raw = pcall(memory.batch_read, pid, stride, sub)
+        if not call_ok then return {} end
+        local data, dlen = to_byte_table(raw)
+        -- Do not synthesize bytes for partial batches; they can create plausible
+        -- but invalid pointers, positions, or entity metadata.
+        if dlen ~= expect then return {} end
+        for b = 1, expect do out[#out + 1] = data[b] end
         i = last + 1
     end
     return out
@@ -1578,16 +1548,8 @@ local function refresh_stats()
     if hp == 0 then error("hp component is NULL") end
     state.hp        = read_uint(hp + OFF.health, 4)
     state.hp_max    = read_uint(hp + OFF.healthMax, 4)
-    -- armor lives at +0x254/+0x258 of the LOCAL PLAYER structure (not of the
-    -- HP component and not on NPC entities); validate the range so a stale
-    -- offset can never show garbage like "Armor: 3e9" again.
-    local ar     = read_uint(lp + OFF.agentarmor, 4)
-    local ar_max = read_uint(lp + OFF.agentarmorMax, 4)
-    if ar < 0 or ar > 100000 or ar_max <= 0 or ar_max > 1000000 then
-        ar, ar_max = 0, 0
-    end
-    state.armor     = ar
-    state.armor_max = ar_max
+    state.armor     = read_uint(hp + OFF.agentarmor, 4)
+    state.armor_max = read_uint(hp + OFF.agentarmorMax, 4)
 end
  
 local function apply_recoil()
@@ -1663,10 +1625,6 @@ local function magic_bullet_should_enable()
     if not state.silent_target_ptr then return false end
     for _, e in ipairs(state.entities) do
         if e.entity_ptr == state.silent_target_ptr then
-            -- weak points are gadget props with their own HP pool: the
-            -- ray-correcting flag works on them too and is REQUIRED to deal
-            -- any damage at all (a normal bullet often can't hit a small prop
-            -- where the aim vector says it should).
             return is_silent_target(e)
         end
     end
@@ -2119,20 +2077,6 @@ local function get_bone_ids_for_entity(e, read_all)
     if read_all then
         return ALL_BONE_IDS_0_90
     end
-
-    -- boss backpacks / propane tanks are separate prop entities; most have no
-    -- meaningful skeleton (aiming then uses the entity position + lift). But
-    -- carried gear (backpacks, exo packs) DOES expose a few bones whose
-    -- average is the exact damage-volume center — read them so silent aim can
-    -- use wp_bone_center() instead of guessing the vertical offset.
-    if is_weak_point_entity(e) then
-        if wp_bone_center(e) ~= nil then
-            return {}   -- bones already known from a previous frame
-        end
-        local b = e.bones
-        if type(b) == "table" and next(b) ~= nil then return {} end
-        return ALL_BONE_IDS_SPARSE
-    end
  
     local pname = profile_name_for(e)
     if pname == "DRONE" then return {} end
@@ -2257,11 +2201,6 @@ local function should_show(e)
  
     if pname == "ITEM" then
         return false
-    end
-
-    -- show weak-point props in ESP so the user can verify silent aim sees them
-    if is_weak_point_entity(e) then
-        return state.esp_show_other or state.weak_points_first
     end
  
     if pname ~= "TURRET"
@@ -2396,17 +2335,7 @@ end
  
 local function aim_point_for(e)
     if not e then return nil end
-
-    -- weak-point props have no usable skeleton: always aim at the entity
-    -- position itself (this is the prop's world center, where its HP
-    -- component takes hits). Never route them through the humanoid profile,
-    -- which would fall back to "head + 1.2m" above an object that has no head.
-    -- NOTE: the entity origin of many props sits at their FEET, so we raise
-    -- the aim point into the actual damage volume (see weak_point_aim_offset).
-    if is_weak_point_entity(e) and silent_accepts_weak_point(e) then
-        return aim_point_for_weak_point(e)
-    end
-
+ 
     local pname = profile_name_for(e)
  
     if pname == "DRONE" or pname == "TURRET" or pname == "ITEM" then
@@ -2475,47 +2404,8 @@ local function find_silent_target(entities, viewproj, wr)
     local w = wr[1]
     if not w or not w.width or w.width <= 0 then return nil end
     local cx, cy = w.x + w.width / 2, w.y + w.height / 2
-
-    -- two-stage target selection: collect weak-point candidates and regular
-    -- NPC candidates separately; switch to head/body targets only once no
-    -- alive weak point is left inside the FOV (destroyed props disappear from
-    -- the entity list on their own, so re-checking each frame is enough).
-    -- A live lock on a weak point gets a stickiness bonus so the aim keeps
-    -- holding the SAME prop until its HP reaches 0 / it despawns.
-    local best_wp, best_wp_score = nil, -math.huge
-    local best_np, best_np_score = nil, -math.huge
-
-    -- cache of humanoid NPC positions for owner-proximity scoring: a prop
-    -- that sits on/next to a boss (healing backpack etc.) outranks loose
-    -- environmental barrels across the room
-    local npc_positions = {}
-    if state.weak_points_first then
-        for _, e in ipairs(entities) do
-            if not e.is_player and not e.is_downed
-               and e.entity_type == ENTITY_TYPE_NPC
-               and (e.relation == "hostile" or e.relation == "unknown")
-               and e.pos then
-                npc_positions[#npc_positions + 1] = e.pos
-            end
-        end
-    end
-
-    local function wp_owner_bonus(e)
-        if #npc_positions == 0 then return 0 end
-        local best_d2 = math.huge
-        for _, p in ipairs(npc_positions) do
-            local dx = e.pos[1] - p[1]
-            local dy = e.pos[2] - p[2]
-            local dz = e.pos[3] - p[3]
-            local d2 = dx * dx + dy * dy + dz * dz
-            if d2 < best_d2 then best_d2 = d2 end
-        end
-        -- within 4 m of an enemy -> strong bonus, fading out to 10 m
-        if best_d2 <= 16 then return 2000 end
-        if best_d2 <= 100 then return 800 end
-        return 0
-    end
-
+ 
+    local best, best_score = nil, -math.huge
     for _, e in ipairs(entities) do
         if not e.is_player and is_silent_target(e) and e.dist <= state.silent_max_dist then
             local tp = aim_point_for(e)
@@ -2525,134 +2415,18 @@ local function find_silent_target(entities, viewproj, wr)
                     local dx, dy = sx - cx, sy - cy
                     local dist_px = math.sqrt(dx * dx + dy * dy)
                     if dist_px < state.silent_fov then
-                        local score = -dist_px
-                        if state.weak_points_first
-                           and is_weak_point_entity(e)
-                           and silent_accepts_weak_point(e) then
-                            -- tier priority: HEALER backpacks first, then fuel
-                            -- tanks / generators, then generic explosives
-                            local tier, _lbl = classify_weak_point(e)
-                            score = score + (3 - tier) * 3000
-                            score = score + wp_owner_bonus(e)
-                            if state.silent_target_ptr
-                               and e.entity_ptr == state.silent_target_ptr
-                               and e.hp > 0 then
-                                score = score + SILENT_WP_STICK_BONUS
-                            end
-                            if score > best_wp_score then
-                                best_wp_score, best_wp = score, e
-                            end
-                        else
-                            if score > best_np_score then
-                                best_np_score, best_np = score, e
-                            end
+                        local prio = aimbot_priority(e)
+                        local score = prio * 10000 - dist_px
+                        if score > best_score then
+                            best_score = score
+                            best = e
                         end
                     end
                 end
             end
         end
     end
-    -- record the currently locked weak point's HP so wp_watchdog can detect
-    -- "hp stopped dropping" (shielded / invulnerable prop) and release the
-    -- lock instead of aiming at an unkillable object forever
-    if best_wp and best_wp.has_hp then
-        if state.wp_lock_ptr ~= best_wp.entity_ptr then
-            state.wp_lock_ptr      = best_wp.entity_ptr
-            state.wp_lock_prev_hp  = best_wp.hp
-            state.wp_lock_start_hp = best_wp.hp
-            state.wp_lock_stall    = 0
-        elseif best_wp.hp < (state.wp_lock_prev_hp or best_wp.hp) then
-            state.wp_lock_prev_hp = best_wp.hp
-            state.wp_lock_stall   = 0
-        end
-    elseif not best_wp then
-        state.wp_lock_ptr     = nil
-        state.wp_lock_stall   = 0
-        state.wp_lock_prev_hp = nil
-    end
-    if best_wp then return best_wp end
-    return best_np
-end
-
--- Weak-point watchdog: runs once per frame with the entity list that was just
--- produced by the ESP scan. Tracks the currently locked prop's HP across
--- frames and fires while we are actually shooting at it:
---   * HP dropped                  -> reset stall counter, keep the lock
---   * HP unchanged + shots fired  -> stall++ ; after WP_STALL_LIMIT stalled
---     shot-windows the prop is marked ignored for WP_IGNORE_SECONDS so the
---     aimbot can move on (invulnerable surface / dead-but-not-despawned prop)
---   * prop despawned / hp <= 0    -> count as destroyed, clear the lock
-local function wp_watchdog()
-    local now = os.clock()
-
-    -- purge expired ignore entries so a prop gets a second chance later
-    for ptr, until_t in pairs(state.wp_ignored) do
-        if now >= until_t then state.wp_ignored[ptr] = nil end
-    end
-
-    -- find the entity the aimbot is currently holding a lock on
-    local cur = nil
-    if state.wp_lock_ptr then
-        for _, e in ipairs(state.entities) do
-            if e.entity_ptr == state.wp_lock_ptr then cur = e break end
-        end
-    end
-
-    -- locked prop despawned / killed -> count it as destroyed and clear lock
-    if state.wp_lock_ptr and (not cur or not is_weak_point_entity(cur)
-       or (cur.has_hp and cur.hp <= 0)) then
-        state.wp_destroyed = state.wp_destroyed + 1
-        state.hit_debug = string.format(
-            "Weak point destroyed (%d total), switching target",
-            state.wp_destroyed)
-        state.wp_lock_ptr        = nil
-        state.wp_lock_prev_hp    = nil
-        state.wp_lock_stall      = 0
-        state.wp_lock_start_hp   = 0
-        return
-    end
-
-    -- freshly locked prop: register first-seen stats
-    if cur and state.wp_seen_ptr ~= cur.entity_ptr then
-        state.wp_seen_ptr = cur.entity_ptr
-        state.wp_seen_count = state.wp_seen_count + 1
-        state.wp_last_shots = state.silent_shots
-        state.hit_debug = string.format("Locked weak point #%d (hp %d)",
-            state.wp_seen_count, cur.hp)
-    end
-
-    -- stall detection: while the SAME prop stays locked and we keep firing
-    -- new rounds but its HP refuses to drop, mark it ignored for a while so
-    -- silent aim moves on to other props / the head. find_silent_target
-    -- updates wp_lock_prev_hp whenever HP drops, so any real hit resets us.
-    if cur and cur.has_hp and state.wp_lock_prev_hp ~= nil
-       and cur.hp >= (state.wp_lock_prev_hp or cur.hp)
-       and state.silent_shots > (state.wp_last_shots or 0) then
-        state.wp_last_shots = state.silent_shots
-        state.wp_lock_stall = (state.wp_lock_stall or 0) + 1
-        if state.wp_lock_stall >= WP_STALL_LIMIT then
-            state.wp_ignored[cur.entity_ptr] = now + WP_IGNORE_SECONDS
-            state.hit_debug = string.format(
-                "Weak point hp stuck at %d -> ignoring %.0fs",
-                cur.hp, WP_IGNORE_SECONDS)
-            state.wp_lock_ptr     = nil
-            state.wp_lock_prev_hp = nil
-            state.wp_lock_stall   = 0
-            state.wp_seen_ptr     = nil
-        end
-    end
-end
-
--- Scan the raw entity list (NOT the filtered silent-target list) and count
--- how many entities currently look like destructible weak points. Used by
--- the UI diagnostics so the user can tell apart "no props nearby" from
--- "props exist but the filter rejects them".
-local function count_weak_point_candidates()
-    local n = 0
-    for _, e in ipairs(state.entities) do
-        if not e.is_player and is_weak_point_entity(e) then n = n + 1 end
-    end
-    return n
+    return best
 end
  
 local function pack_vec3(v)
@@ -2739,10 +2513,6 @@ local function silent_tick(pid, base)
  
             local tp = aim_point_for(target)
             if tp then
-                state.silent_target_kind =
-                    (is_weak_point_entity(target)
-                     and silent_accepts_weak_point(target))
-                    and "weak point" or "npc"
                 local aim_addr = aim + OFF.worldAimPos
                 local aim_bytes = pack_vec3(tp)
  
@@ -2763,16 +2533,7 @@ local function silent_tick(pid, base)
  
                 state.diag_last_write = { tp[1], tp[2], tp[3] }
                 state.silent_armed = true
-                if state.silent_target_kind == "weak point" then
-                    state.silent_target_name = string.format(
-                        "WEAK POINT %s (%s) %.0fm",
-                        target.wp_label or "PROP",
-                        (target.ent_name ~= "" and target.ent_name or "unnamed"),
-                        target.dist)
-                else
-                    state.silent_target_name = string.format(
-                        "%s %.0fm", state.aim_part, target.dist)
-                end
+                state.silent_target_name = string.format("%s %.0fm", state.aim_part, target.dist)
             end
         else
             release_silent_lock(pid)
@@ -2808,9 +2569,6 @@ local function silent_tick(pid, base)
         if state.magic_bullet then
             local on = false
             if state.silent_armed and state.silent_target_ptr and target then
-                -- magic bullet must stay ON for weak points as well: props are
-                -- tiny raycast targets, without the correction bullets aimed
-                -- at them simply pass through and deal zero damage.
                 on = is_silent_target(target)
             end
             write_uint(base + RVA.magicbullet,
@@ -2907,8 +2665,9 @@ function OnDestroy()
         pcall(restore_combat_override,
               "high_headshot_dmg_addr", "high_headshot_dmg_original", true)
  
-        pcall(write_f32, state.base + RVA.recoil, DEFAULT_RECOIL)
-        pcall(write_f32, state.base + RVA.spread, DEFAULT_SPREAD)
+        -- Do not force guessed defaults during shutdown. The original values may
+        -- differ by build/session; only restore values that were actually captured.
+        -- RPM restoration above uses rpm_original when one was recorded.
  
         if memory.unlock_all then
             pcall(memory.unlock_all, state.pid)
@@ -2917,6 +2676,50 @@ function OnDestroy()
     reset_weapon_cache()
 end
  
+-- Drop stale process state without writing guessed values into a process that
+-- may already be gone or may now refer to a different game instance.
+local function detach_stale_process(reason)
+    local old_pid = state.pid
+
+    if old_pid and old_pid ~= 0 and memory and type(memory.unlock_all) == "function" then
+        pcall(memory.unlock_all, old_pid)
+    end
+
+    state.pid = 0
+    state.base = 0
+    state.process_check_timer = 0
+    state.attach_timer = 0
+    state.esp_enabled = false
+    state.silent_enabled = false
+    state.magic_bullet = false
+    state.rpm_enabled = false
+    state.instant_reload = false
+    state.no_sway = false
+    state.extended_range = false
+    state.move_speed = false
+    state.accuracy_locked = false
+    state.fast_fire = false
+    state.high_headshot_dmg = false
+    state.no_recoil = false
+    state.no_spread = false
+    state.master_enabled = false
+    state.recoil_locked = false
+    state.spread_rva_locked = false
+    state.spread_aim_addrs = nil
+    state.silent_lock_addr = nil
+    state.silent_armed = false
+    state.silent_target_ptr = nil
+    state._was_attached = false
+    state._stable_frames = 0
+    state._transition_frames = 0
+    state.entities = {}
+    state.local_pos = nil
+    state.window_rect = nil
+    state.master_snapshot = nil
+    reset_weapon_cache()
+    state.status = reason or "Process lost; waiting to reconnect"
+end
+
 function OnUpdate(dt)
     _frame_id = _frame_id + 1
     refresh_weapon_max_damage(false)
@@ -2940,16 +2743,42 @@ function OnUpdate(dt)
         if not dok then state.dbg_err = tostring(derr) end
     end
  
+    -- Verify the cached PID periodically. A stale PID/base pair can otherwise
+    -- survive after the game closes or restarts and feed later reads/writes.
+    if state.pid ~= 0 then
+        state.process_check_timer = state.process_check_timer + (dt or 0)
+        if state.process_check_timer >= 2.0 then
+            state.process_check_timer = 0
+            local check_ok, current_pid = pcall(function()
+                if not memory or type(memory.get_pid) ~= "function" then
+                    error("process lookup API unavailable")
+                end
+                return memory.get_pid(state.name)
+            end)
+            if not check_ok or type(current_pid) ~= "number" or current_pid ~= state.pid then
+                detach_stale_process("Process lost or restarted; waiting to reconnect")
+            end
+        end
+    end
+
     if state.pid == 0 then
         state.attach_timer = state.attach_timer + (dt or 0)
         if state.attach_timer >= 2.0 then
             state.attach_timer = 0
             local ok, pid = pcall(memory.get_pid, state.name)
-            if ok and pid and pid > 0 then
-                state.pid = pid
-                state.base = memory.get_process_base(state.pid)
-                state.walk_skip = 0
-                state.status = string.format("Attached PID %d 0x%X", state.pid, state.base)
+            if ok and type(pid) == "number" and pid > 0 then
+                -- Process-base lookup can fail while the game is starting or closing.
+                local base_ok, base = pcall(memory.get_process_base, pid)
+                if base_ok and type(base) == "number" and base > 0 then
+                    state.pid = pid
+                    state.base = base
+                    state.walk_skip = 0
+                    state.status = string.format("Attached PID %d 0x%X", state.pid, state.base)
+                else
+                    state.pid = 0
+                    state.base = 0
+                    state.status = "Waiting: process base unavailable"
+                end
             end
         end
     end
@@ -3212,7 +3041,6 @@ function OnUpdate(dt)
  
             local hp_valid_index = {}
             local hp_data_addrs = {}
-            local wp_armor_addrs = {}
             local hp_slot_count = 0
             for i = 1, #ptrs do
                 local off = (i - 1) * 8
@@ -3223,22 +3051,11 @@ function OnUpdate(dt)
                         hp_valid_index[i] = hp_slot_count
                         hp_data_addrs[#hp_data_addrs + 1] = hp + OFF.health
                         hp_data_addrs[#hp_data_addrs + 1] = hp + OFF.healthMax
-                        -- prop armor/shield pool (only meaningful for weak
-                        -- points; garbage on agents is filtered out later via
-                        -- the hp_max sanity check in is_alive_weak_point)
-                        wp_armor_addrs[hp_slot_count] = hp + OFF.wpArmor
                     end
                 end
             end
             local hp_data_raw = #hp_data_addrs > 0
                 and batch_read_chunked(pid, 4, hp_data_addrs) or nil
-
-            local wp_armor_raw = nil
-            if #wp_armor_addrs > 0 then
-                local a_list = {}
-                for s = 1, hp_slot_count do a_list[#a_list + 1] = wp_armor_addrs[s] end
-                wp_armor_raw = batch_read_chunked(pid, 4, a_list)
-            end
  
             do
                 local misses, seen = {}, {}
@@ -3386,19 +3203,12 @@ end
                                     local faction_tag = state.faction_tag_cache[faction] or ""
  
                                     local hp_val, hp_max = 0, 0
-                                    local wp_armor = 0
                                     local vi = hp_valid_index[i]
                                     if vi and hp_data_raw then
                                         local doff = (vi - 1) * 8
                                         if #hp_data_raw >= doff + 8 then
                                             hp_val = uint_from(hp_data_raw, doff + 1, 4)
                                             hp_max = uint_from(hp_data_raw, doff + 5, 4)
-                                        end
-                                    end
-                                    if vi and wp_armor_raw then
-                                        local aoff = (vi - 1) * 4
-                                        if #wp_armor_raw >= aoff + 4 then
-                                            wp_armor = uint_from(wp_armor_raw, aoff + 1, 4)
                                         end
                                     end
                                     local is_low_hp = hp_max > 0 and (hp_val / hp_max) < 0.1
@@ -3449,27 +3259,7 @@ end
                                         pred_pos[2] = pos[2] + (pos[2] - prev[2]) * ESP_PREDICT_STRENGTH
                                         pred_pos[3] = pos[3] + (pos[3] - prev[3]) * ESP_PREDICT_STRENGTH
                                     end
-
-                                    -- weak-point kind tag for ESP / target name:
-                                    -- HEALER (boss healing backpack), FUEL
-                                    -- (flamethrower tank / generator), EXPLOSIVE
-                                    local wp_tier, wp_label = nil, nil
-                                    if not is_player then
-                                        local probe = {
-                                            is_player       = false,
-                                            is_downed       = is_downed,
-                                            archetype       = archetype,
-                                            ent_name        = ent_name,
-                                            entity_type_int = entity_type_int,
-                                            has_hp          = (vi ~= nil),
-                                            hp_max          = hp_max,
-                                            wp_armor        = wp_armor,
-                                        }
-                                        if is_weak_point_entity(probe) then
-                                            wp_tier, wp_label = classify_weak_point(probe)
-                                        end
-                                    end
-
+ 
                                     ents[#ents + 1] = {
                                         pos = pos, pred_pos = pred_pos,
                                         dist = dist, entity_ptr = ptrs[i],
@@ -3486,14 +3276,11 @@ end
                                         faction_tag = faction_tag,
                                         is_downed = is_downed,
                                         hp = hp_val, hp_max = hp_max,
-                                        wp_armor = wp_armor,
-                                        has_hp = (vi ~= nil),
                                         is_low_hp = is_low_hp,
                                         archetype = archetype,
                                         archetype_name = (archetype ~= nil)
                                             and ARCHETYPE_NAME_BY_ID[archetype] or nil,
                                         tier = tier, tier_valid = tier_valid,
-                                        wp_tier = wp_tier, wp_label = wp_label,
                                     }
                                 end
                             end
@@ -3531,7 +3318,6 @@ end
  
  
         silent_tick(pid, base)
-        pcall(wp_watchdog)
  
         state.telem_valid       = false
         state.telem_world_aim   = nil
@@ -3595,8 +3381,6 @@ end
                                 or pname == "MINITANK"
                                 or pname == "BIG_DOG" or pname == "WARHOUND_GRENADIER"
                                 or pname == "WARHOUND_MINIGUN"
-                            local is_wp = is_weak_point_entity(e)
-                            if is_wp then is_summon_box = true end
                             local draw_box = state.esp_boxes
                                 and ( is_summon_box
                                       or not state.esp_bones
@@ -3604,22 +3388,6 @@ end
  
                             local box_h, box_w, box_cx, box_cy = compute_box(e, m, w, sx, sy)
                             sx = box_cx or sx
-
-                            -- for weak-point props draw an explicit marker at
-                            -- the exact world position silent aim writes into
-                            -- the aim-control (damage-volume center). If this
-                            -- cross does NOT sit on the visible prop (e.g. it
-                            -- appears in the NPC's legs), the offset heuristic
-                            -- below needs adjusting for that prop type.
-                            if is_wp then
-                                local ap = aim_point_for_weak_point(e)
-                                local ax, ay = world_to_screen(ap, m, w)
-                                if ax and ay then
-                                    draw.line(ax - 6, ay, ax + 6, ay, 255, 200, 0, 230, 1.5)
-                                    draw.line(ax, ay - 6, ax, ay + 6, 255, 200, 0, 230, 1.5)
-                                    draw.circle(ax, ay, 4, 255, 200, 0, 180, 1.0)
-                                end
-                            end
  
                             if state.esp_snaplines then
                                 local snap_y = is_summon_box and sy or box_cy
@@ -3683,16 +3451,7 @@ end
  
                             if state.esp_type and e.ent_type then
                                 local tlabel = e.ent_type
-                                if is_wp then
-                                    tlabel = string.format(
-                                        "%s hp %d/%d%s Ty%d A%s",
-                                        e.wp_label or "WEAKPOINT",
-                                        e.hp or 0, e.hp_max or 0,
-                                        ((e.wp_armor or 0) > 0)
-                                            and (" ar" .. tostring(e.wp_armor)) or "",
-                                        e.entity_type_int or 0,
-                                        tostring(e.archetype))
-                                elseif e.archetype_name then
+                                if e.archetype_name then
                                     tlabel = tlabel .. ":" .. e.archetype_name
                                 end
                                 local yoff = state.esp_name and -24 or -12
@@ -3794,7 +3553,6 @@ end
             { "ESP",            state.esp_enabled },
             { "Silent aim",     state.silent_enabled },
             { "Target gadgets", state.target_gadgets },
-            { "Weak points first", state.weak_points_first },
             { "No recoil",      state.no_recoil },
             { "No spread",      state.no_spread },
             { "Magic bullet",   state.magic_bullet },
@@ -3890,11 +3648,6 @@ end
                 if checkbox_edge("Pelvis", state.aim_part == "pelvis") then state.aim_part = "pelvis" end
                 ui.small("Current: " .. state.aim_part)
                 ui.small("(humanoid rigs honor this; vehicles use profile aim bone)")
-                chk("Weak points first (backpacks/tanks)", "weak_points_first")
-                ui.small("Silent aim shoots boss backpacks/propane tanks before switching to the head")
-                state.wp_aim_lift = select(1, ui.slider_f32("Weak point aim lift x", state.wp_aim_lift, 0.0, 3.0))
-                ui.small(string.format("Vertical lift of prop aim point (%.2fx; tank ~%.1fm, generator ~%.1fm above origin)",
-                    state.wp_aim_lift, 0.70 * state.wp_aim_lift, 1.00 * state.wp_aim_lift))
  
                 ui.separator()
                 state.silent_fov = select(1, ui.slider_f32("FOV", state.silent_fov, 10, 800))
@@ -3906,12 +3659,6 @@ end
                 ui.small("Target: " .. (state.silent_target_name ~= "" and state.silent_target_name or "none"))
                 ui.small(state.silent_armed and "ARMED (kernel lock ~10ms)" or "idle")
                 ui.small("Shots: " .. state.silent_shots)
-                ui.separator()
-                ui.small(string.format("Weak points nearby: %d  locked: %d  destroyed: %d",
-                    count_weak_point_candidates(),
-                    state.wp_lock_ptr and 1 or 0,
-                    state.wp_destroyed))
-                if state.hit_debug ~= "" then ui.small(state.hit_debug) end
             end)
  
             ui.collapsing_header("ESP settings", function()
