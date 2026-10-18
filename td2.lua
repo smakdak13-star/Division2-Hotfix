@@ -150,11 +150,143 @@ for _, n in ipairs({
     "generator","antenna","terminal","console","vending",
 }) do NON_COMBATANT_NAME_PARTS[#NON_COMBATANT_NAME_PARTS + 1] = n end
 
+
+local BONE_PROFILES = {
+    PLAYER_HUMANOID = {
+        indices     = {0, 2, 4, 7, 8, 10, 15, 16, 17, 45, 46, 47, 79, 80, 84, 87, 88, 92},
+        connections = {
+            {8,7},{7,4},{4,2},
+            {4,15},{15,16},{16,17},
+            {4,45},{45,46},{46,47},
+            {2,84},{84,79},{79,80},
+            {2,92},{92,87},{87,88},
+        },
+        aim_bone = 8, aim_bone_fallback = 7,
+        expected = 104, is_humanoid = true,
+    },
+    NPC_HUMANOID = {
+        indices     = {0, 2, 4, 6, 8, 9, 14, 15, 17, 44, 45, 47, 78, 79, 83, 86, 87, 91},
+        connections = {
+            {8,6},{6,4},{4,2},
+            {4,14},{14,15},{15,17},
+            {4,44},{44,45},{45,47},
+            {2,83},{83,78},{78,79},
+            {2,91},{91,86},{86,87},
+        },
+        aim_bone = 8, aim_bone_fallback = 8,
+        expected = 104, is_humanoid = true,
+    },
+    BIG_DOG = {
+        indices     = {0, 2, 7, 8, 9, 14, 15, 16, 25, 30, 31, 32, 33, 36, 37, 38, 39},
+        connections = {
+            {9,8},{8,7},{7,2},
+            {16,15},{15,14},{14,2},
+            {39,38},{38,37},{37,36},{36,2},
+            {33,32},{32,31},{31,30},{30,2},
+            {2,25},
+        },
+        aim_bone = 7, aim_bone_fallback = 2,
+        expected = 0, is_humanoid = false,
+    },
+    WARHOUND_GRENADIER = {
+        indices     = {0, 2, 7, 8, 9, 16, 17, 18, 27, 38, 39, 40, 41, 45, 46, 47, 48},
+        connections = {
+            {9,8},{8,7},{7,2},
+            {18,17},{17,16},{16,2},
+            {41,40},{40,39},{39,38},{38,2},
+            {48,47},{47,46},{46,45},{45,2},
+            {2,27},
+        },
+        aim_bone = 7, aim_bone_fallback = 2,
+        expected = 0, is_humanoid = false,
+    },
+    WARHOUND_MINIGUN = {
+        indices     = {0, 2, 7, 8, 9, 16, 17, 18, 27, 34, 35, 36, 37, 40, 41, 42, 44},
+        connections = {
+            {9,8},{8,7},{7,2},
+            {18,17},{17,16},{16,2},
+            {44,42},{42,41},{41,40},{40,2},
+            {37,36},{36,35},{35,34},{34,2},
+            {2,27},
+        },
+        aim_bone = 7, aim_bone_fallback = 2,
+        expected = 0, is_humanoid = false,
+    },
+    MINITANK = {
+        indices     = {0,1,7,8,13,14,15,16,22,23,28,29,31,33,35,37},
+        connections = {
+            {0,1},{1,7},{7,13},{1,8},{8,14},
+            {0,16},{16,22},{22,28},{16,23},{23,29},
+            {31,33},{33,35},{33,37},
+            {1,31},{16,31},
+        },
+        aim_bone = 31, aim_bone_fallback = 0,
+        expected = 40, is_humanoid = false,
+    },
+    ITEM = {
+        indices     = {},
+        connections = {},
+        aim_bone = nil, aim_bone_fallback = nil,
+        expected = 0, is_humanoid = false,
+    },
+    NO_SKELETON = {
+        indices     = {},
+        connections = {},
+        aim_bone = nil, aim_bone_fallback = nil,
+        expected = 0, is_humanoid = false,
+    },
+}
+
+local ARCHETYPE_PROFILE = {}
+for _, k in ipairs({
+    "Assault","Rusher","Thrower","Sniper","Controller","HeavyWeapons",
+    "Tank","Support","Medic","Engineer","RPG","Immobilizer","Bomber",
+    "Flamer","Disruptor","Shield","Hunter","LootGoblin","Bodyguard",
+    "Leader","Special","Civilian","RogueAgent","DroneOperator",
+}) do ARCHETYPE_PROFILE[NPC_ARCHETYPE[k]] = "NPC_HUMANOID" end
+for _, k in ipairs({
+    "BigDog","BigDogConvoy","BigDogFlamer","BigDogMortar","BigDogSmall",
+    "DogCompanion",
+}) do ARCHETYPE_PROFILE[NPC_ARCHETYPE[k]] = "BIG_DOG" end
+ARCHETYPE_PROFILE[NPC_ARCHETYPE.BigDogGrenadier] = "WARHOUND_GRENADIER"
+ARCHETYPE_PROFILE[NPC_ARCHETYPE.BigDogMinigun]   = "WARHOUND_MINIGUN"
+ARCHETYPE_PROFILE[NPC_ARCHETYPE.MiniTank] = "MINITANK"
+
+local LEGACY_BONE_NAMES = {
+    PLAYER_HUMANOID  = { head=8, chest=7, belly=4, root=2,
+                         l_shoulder=15, r_shoulder=45, l_arm=16, r_arm=46,
+                         l_hand=17, r_hand=47,
+                         l_knee=79, r_knee=87, l_heel=80, r_heel=88,
+                         l_toe=84, r_toe=92 },
+    NPC_HUMANOID     = { head=8, chest=6, belly=4, root=2,
+                         l_shoulder=14, r_shoulder=44, l_arm=15, r_arm=45,
+                         l_hand=17, r_hand=47,
+                         l_knee=78, r_knee=86, l_heel=79, r_heel=87,
+                         l_toe=83, r_toe=91 },
+    BIG_DOG            = { root=0, pelvis=2, chest=7, head=9, top=9 },
+    WARHOUND_GRENADIER = { root=0, pelvis=2, chest=7, head=9, top=9 },
+    WARHOUND_MINIGUN   = { root=0, pelvis=2, chest=7, head=9, top=9 },
+    MINITANK         = { head=31, chest=33, belly=33, root=0,
+                         l_top=31, r_top=35, l_front=1, r_front=16,
+                         middle=33, top=37 },
+    ITEM             = { root=0 },
+}
+ 
+local function name_is_blacklisted(name)
+    if not name or name == "" then return false end
+    local ln = lc(name)
+    for _, pat in ipairs(NON_COMBATANT_NAME_PARTS) do
+        if ln:find(pat, 1, true) then return true end
+    end
+    return false
+end
+ 
+ 
+
 -- ═══════════════════════════════════════════════════════════════════════════
--- УЯЗВИМЫЕ ТОЧКИ ДЛЯ КАЖДОГО ТИПА ВРАГА
+-- УЯЗВИМЫЕ ТОЧКИ ДЛЯ КАЖДОГО ТИПА ВРАГА (таблица приоритетных костей)
 -- ═══════════════════════════════════════════════════════════════════════════
 
--- Слабые места для боссов и особых врагов
 local WEAK_POINTS = {
     -- Минитанк: ядро на спине (bone 33), сенсор (31), корпус (0)
     [NPC_ARCHETYPE.MiniTank] = {
@@ -219,391 +351,6 @@ local WEAK_POINTS = {
         fallback = "chest"
     },
 }
-
-local BONE_PROFILES = {
-    PLAYER_HUMANOID = {
-        indices     = {0, 2, 4, 7, 8, 10, 15, 16, 17, 45, 46, 47, 79, 80, 84, 87, 88, 92},
-        connections = {
-            {8,7},{7,4},{4,2},
-            {4,15},{15,16},{16,17},
-            {4,45},{45,46},{46,47},
-            {2,84},{84,79},{79,80},
-            {2,92},{92,87},{87,88},
-        },
-        aim_bone = 8, aim_bone_fallback = 7,
-        expected = 104, is_humanoid = true,
-    },
-    NPC_HUMANOID = {
-        indices     = {0, 2, 4, 6, 8, 9, 14, 15, 17, 44, 45, 47, 78, 79, 83, 86, 87, 91},
-        connections = {
-            {8,6},{6,4},{4,2},
-            {4,14},{14,15},{15,17},
-            {4,44},{44,45},{45,47},
-            {2,83},{83,78},{78,79},
-            {2,91},{91,86},{86,87},
-        },
-        aim_bone = 8, aim_bone_fallback = 8,
-        expected = 104, is_humanoid = true,
-    },
-    BIG_DOG = {
-        indices     = {0, 2, 7, 8, 9, 14, 15, 16, 25, 30, 31, 32, 33, 36, 37, 38, 39},
-        connections = {
-            {9,8},{8,7},{7,2},
-            {16,15},{15,14},{14,2},
-            {39,38},{38,37},{37,36},{36,2},
-            {33,32},{32,31},{31,30},{30,2},
-            {2,25},
-        },
-        aim_bone = 7, aim_bone_fallback = 2,
-        expected = 0, is_humanoid = false,
-    },
-    WARHOUND_GRENADIER = {
-        indices     = {0, 2, 7, 8, 9, 16, 17, 18, 27, 38, 39, 40, 41, 45, 46, 47, 48},
-        connections = {
-            {9,8},{8,7},{7,2},
-            {18,17},{17,16},{16,2},
-            {41,40},{40,39},{39,38},{38,2},
-            {48,47},{47,46},{46,45},{45,2},
-            {2,27},
-        },
-        aim_bone = 7, aim_bone_fallback = 2,
-        expected = 0, is_humanoid = false,
-    },
-    WARHOUND_MINIGUN = {
-        indices     = {0, 2, 7, 8, 9, 16, 17, 18, 27, 34, 35, 36, 37, 40, 41, 42, 44},
-        connections = {
-            {9,8},{8,7},{7,2},
-            {18,17},{17,16},{16,2},
-            {44,42},{42,41},{41,40},{40,2},
-            {37,36},{36,35},{35,34},{34,2},
-            {2,27},
-        },
-        aim_bone = 7, aim_bone_fallback = 2,
-        expected = 0, is_humanoid = false,
-    },
-    MINITANK = {
-        indices     = {0,1,7,8,13,14,15,16,22,23,28,29,31,33,35,37},
-        connections = {
-            {0,1},{1,7},{7,13},{1,8},{8,14},
-            {0,16},{16,22},{22,28},{16,23},{23,29},
-            {31,33},{33,35},{33,37},
-            {1,31},{16,31},
-        },
-        aim_bone = 31, aim_bone_fallback = 0,
-        expected = 40, is_humanoid = false,
-    },
-    ITEM = {
-        indices     = {},
-        connections = {},
-        aim_bone = nil, aim_bone_fallback = nil,
-        expected = 0, is_humanoid = false,
-    },
-    NO_SKELETON = {
-        indices     = {},
-        connections = {},
-        aim_bone = nil, aim_bone_fallback = nil,
-        expected = 0, is_humanoid = false,
-    },
-}
-
-local ARCHETYPE_PROFILE = {}
-for _, k in ipairs({
-    "Assault","Rusher","Thrower","Sniper","Controller","HeavyWeapons",
-    "Tank","Support","Medic","Engineer","RPG","Immobilizer","Bomber",
-    "Flamer","Disruptor","Shield","Hunter","LootGoblin","Bodyguard",
-    "Leader","Special","Civilian","RogueAgent","DroneOperator",
-}) do ARCHETYPE_PROFILE[NPC_ARCHETYPE[k]] = "NPC_HUMANOID" end
-for _, k in ipairs({
-    "BigDog","BigDogConvoy","BigDogFlamer","BigDogMortar","BigDogSmall",
-    "DogCompanion",
-}) do ARCHETYPE_PROFILE[NPC_ARCHETYPE[k]] = "BIG_DOG" end
-ARCHETYPE_PROFILE[NPC_ARCHETYPE.BigDogGrenadier] = "WARHOUND_GRENADIER"
-ARCHETYPE_PROFILE[NPC_ARCHETYPE.BigDogMinigun]   = "WARHOUND_MINIGUN"
-ARCHETYPE_PROFILE[NPC_ARCHETYPE.MiniTank] = "MINITANK"
-
-local LEGACY_BONE_NAMES = {
-    PLAYER_HUMANOID  = { head=8, chest=7, belly=4, root=2,
-                         l_shoulder=15, r_shoulder=45, l_arm=16, r_arm=46,
-                         l_hand=17, r_hand=47,
-                         l_knee=79, r_knee=87, l_heel=80, r_heel=88,
-                         l_toe=84, r_toe=92 },
-    NPC_HUMANOID     = { head=8, chest=6, belly=4, root=2,
-                         l_shoulder=14, r_shoulder=44, l_arm=15, r_arm=45,
-                         l_hand=17, r_hand=47,
-                         l_knee=78, r_knee=86, l_heel=79, r_heel=87,
-                         l_toe=83, r_toe=91 },
-    BIG_DOG            = { root=0, pelvis=2, chest=7, head=9, top=9 },
-    WARHOUND_GRENADIER = { root=0, pelvis=2, chest=7, head=9, top=9 },
-    WARHOUND_MINIGUN   = { root=0, pelvis=2, chest=7, head=9, top=9 },
-    MINITANK         = { head=31, chest=33, belly=33, root=0,
-                         l_top=31, r_top=35, l_front=1, r_front=16,
-                         middle=33, top=37 },
-    ITEM             = { root=0 },
-}
-
--- ═══════════════════════════════════════════════════════════════════════════
--- УЛУЧШЕННЫЙ ПОИСК УЯЗВИМОЙ ТОЧКИ
--- ═══════════════════════════════════════════════════════════════════════════
-
-local function get_weak_point(e)
-    if not e then return nil end
-    
-    local pname = profile_name_for(e)
-    local bt = LEGACY_BONE_NAMES[pname] or LEGACY_BONE_NAMES.NPC_HUMANOID
-    local bones = e.bones
-    
-    -- 1. Если враг почти мёртв (<15% HP) — всегда целимся в голову для добивания
-    if e.hp_max and e.hp_max > 0 and (e.hp / e.hp_max) < 0.15 then
-        if bt.head and bones and bones[bt.head] then
-            return bones[bt.head]
-        end
-    end
-    
-    -- 2. Проверяем специфичные уязвимые точки для боссов/техники
-    if e.archetype and WEAK_POINTS[e.archetype] then
-        local wp = WEAK_POINTS[e.archetype]
-        -- Пробуем все приоритетные кости
-        for _, bone_id in ipairs(wp.priority) do
-            if bones and bones[bone_id] then
-                return bones[bone_id]
-            end
-        end
-        -- Фолбэк
-        if wp.fallback == "head" and bt.head and bones and bones[bt.head] then
-            return bones[bt.head]
-        elseif wp.fallback == "chest" and bt.chest and bones and bones[bt.chest] then
-            return bones[bt.chest]
-        elseif wp.fallback == "center" then
-            return e.pos
-        end
-    end
-    
-    -- 3. Для людей — по настройке
-    if pname == "NPC_HUMANOID" or pname == "PLAYER_HUMANOID" then
-        if state.aim_part == "head" and bt.head and bones and bones[bt.head] then
-            return bones[bt.head]
-        end
-        if state.aim_part == "chest" and bt.chest and bones and bones[bt.chest] then
-            return bones[bt.chest]
-        end
-        if state.aim_part == "pelvis" and bt.belly and bones and bones[bt.belly] then
-            return bones[bt.belly]
-        end
-        -- fallback: голова
-        if bt.head and bones and bones[bt.head] then return bones[bt.head] end
-        if bt.chest and bones and bones[bt.chest] then return bones[bt.chest] end
-    end
-    
-    -- 4. Для техники без специфичных точек
-    if pname == "BIG_DOG" or pname == "WARHOUND_GRENADIER" or pname == "WARHOUND_MINIGUN" then
-        if bones and bones[9] then return bones[9] end  -- сенсор
-        if bones and bones[7] then return bones[7] end  -- корпус
-        if bones and bones[2] then return bones[2] end  -- корень
-    elseif pname == "MINITANK" then
-        if bones and bones[33] then return bones[33] end  -- ядро
-        if bones and bones[31] then return bones[31] end  -- сенсор
-        if bones and bones[0] then return bones[0] end    -- корень
-    end
-    
-    -- 5. Финальный fallback — позиция энтити
-    return e.pos
-end
-
--- Замена aim_point_for
-local function aim_point_for(e)
-    if not e then return nil end
-    local wp = get_weak_point(e)
-    if wp then return wp end
-    return { e.pos[1], e.pos[2], e.pos[3] }
-end
-
--- ═══════════════════════════════════════════════════════════════════════════
--- УЛУЧШЕННЫЙ ПОИСК ЦЕЛИ С ПРИОРИТИЗАЦИЕЙ
--- ═══════════════════════════════════════════════════════════════════════════
-
-local function find_silent_target(entities, viewproj, wr)
-    if not viewproj then return nil end
-    wr = normalize_window_rect(wr)
-    if not wr then return nil end
-    local w = wr[1]
-    if not w or not w.width or w.width <= 0 then return nil end
-    local cx, cy = w.x + w.width / 2, w.y + w.height / 2
-    
-    local best, best_score = nil, -math.huge
-    for _, e in ipairs(entities) do
-        if not e.is_player and is_silent_target(e) and e.dist <= state.silent_max_dist then
-            local tp = get_weak_point(e)
-            if tp then
-                local sx, sy = world_to_screen(tp, viewproj, w)
-                if sx and sy then
-                    local dx, dy = sx - cx, sy - cy
-                    local dist_px = math.sqrt(dx * dx + dy * dy)
-                    if dist_px < state.silent_fov then
-                        local prio = aimbot_priority(e)
-                        
-                        -- Бонус за уязвимость (есть скелет/специфичная точка)
-                        local weak_bonus = 0
-                        if e.bones and next(e.bones) ~= nil then
-                            weak_bonus = 5000
-                        end
-                        
-                        -- Бонус за низкий HP (добивание)
-                        local hp_bonus = 0
-                        if e.hp_max and e.hp_max > 0 then
-                            local hp_ratio = e.hp / e.hp_max
-                            if hp_ratio < 0.3 then hp_bonus = 3000 end
-                            if hp_ratio < 0.15 then hp_bonus = 6000 end
-                        end
-                        
-                        -- Бонус за боссов (приоритет)
-                        local boss_bonus = 0
-                        if e.tier == NPC_THREAT_TIER.Boss then boss_bonus = 8000 end
-                        if e.tier == NPC_THREAT_TIER.Heavy then boss_bonus = 4000 end
-                        
-                        local score = prio * 10000 - dist_px + weak_bonus + hp_bonus + boss_bonus
-                        if score > best_score then
-                            best_score = score
-                            best = e
-                        end
-                    end
-                end
-            end
-        end
-    end
-    return best
-end
- 
-local function name_is_blacklisted(name)
-    if not name or name == "" then return false end
-    local ln = lc(name)
-    for _, pat in ipairs(NON_COMBATANT_NAME_PARTS) do
-        if ln:find(pat, 1, true) then return true end
-    end
-    return false
-end
- 
-local BONE_PROFILES = {
- 
-    PLAYER_HUMANOID = {
-        indices     = {0, 2, 4, 7, 8, 10, 15, 16, 17, 45, 46, 47, 79, 80, 84, 87, 88, 92},
-        connections = {
-            {8,7},{7,4},{4,2},
-            {4,15},{15,16},{16,17},
-            {4,45},{45,46},{46,47},
-            {2,84},{84,79},{79,80},
-            {2,92},{92,87},{87,88},
-        },
-        aim_bone = 8, aim_bone_fallback = 7,
-        expected = 104, is_humanoid = true,
-    },
-    NPC_HUMANOID = {
-        indices     = {0, 2, 4, 6, 8, 9, 14, 15, 17, 44, 45, 47, 78, 79, 83, 86, 87, 91},
-        connections = {
-            {8,6},{6,4},{4,2},
-            {4,14},{14,15},{15,17},
-            {4,44},{44,45},{45,47},
-            {2,83},{83,78},{78,79},
-            {2,91},{91,86},{86,87},
-        },
-        aim_bone = 8, aim_bone_fallback = 8,
-        expected = 104, is_humanoid = true,
-    },
-    BIG_DOG = {
-        indices     = {0, 2, 7, 8, 9, 14, 15, 16, 25, 30, 31, 32, 33, 36, 37, 38, 39},
-        connections = {
-            {9,8},{8,7},{7,2},
-            {16,15},{15,14},{14,2},
-            {39,38},{38,37},{37,36},{36,2},
-            {33,32},{32,31},{31,30},{30,2},
-            {2,25},
-        },
-        aim_bone = 7, aim_bone_fallback = 2,
-        expected = 0, is_humanoid = false,
-    },
-    WARHOUND_GRENADIER = {
-        indices     = {0, 2, 7, 8, 9, 16, 17, 18, 27, 38, 39, 40, 41, 45, 46, 47, 48},
-        connections = {
-            {9,8},{8,7},{7,2},
-            {18,17},{17,16},{16,2},
-            {41,40},{40,39},{39,38},{38,2},
-            {48,47},{47,46},{46,45},{45,2},
-            {2,27},
-        },
-        aim_bone = 7, aim_bone_fallback = 2,
-        expected = 0, is_humanoid = false,
-    },
-    WARHOUND_MINIGUN = {
-        indices     = {0, 2, 7, 8, 9, 16, 17, 18, 27, 34, 35, 36, 37, 40, 41, 42, 44},
-        connections = {
-            {9,8},{8,7},{7,2},
-            {18,17},{17,16},{16,2},
-            {44,42},{42,41},{41,40},{40,2},
-            {37,36},{36,35},{35,34},{34,2},
-            {2,27},
-        },
-        aim_bone = 7, aim_bone_fallback = 2,
-        expected = 0, is_humanoid = false,
-    },
-    MINITANK = {
-        indices     = {0,1,7,8,13,14,15,16,22,23,28,29,31,33,35,37},
-        connections = {
-            {0,1},{1,7},{7,13},{1,8},{8,14},
-            {0,16},{16,22},{22,28},{16,23},{23,29},
-            {31,33},{33,35},{33,37},
-            {1,31},{16,31},
-        },
-        aim_bone = 31, aim_bone_fallback = 0,
-        expected = 40, is_humanoid = false,
-    },
-    ITEM = {
-        indices     = {},
-        connections = {},
-        aim_bone = nil, aim_bone_fallback = nil,
-        expected = 0, is_humanoid = false,
-    },
-    NO_SKELETON = {
-        indices     = {},
-        connections = {},
-        aim_bone = nil, aim_bone_fallback = nil,
-        expected = 0, is_humanoid = false,
-    },
-}
- 
-local ARCHETYPE_PROFILE = {}
-for _, k in ipairs({
-    "Assault","Rusher","Thrower","Sniper","Controller","HeavyWeapons",
-    "Tank","Support","Medic","Engineer","RPG","Immobilizer","Bomber",
-    "Flamer","Disruptor","Shield","Hunter","LootGoblin","Bodyguard",
-    "Leader","Special","Civilian","RogueAgent","DroneOperator",
-}) do ARCHETYPE_PROFILE[NPC_ARCHETYPE[k]] = "NPC_HUMANOID" end
-for _, k in ipairs({
-    "BigDog","BigDogConvoy","BigDogFlamer","BigDogMortar","BigDogSmall",
-    "DogCompanion",
-}) do ARCHETYPE_PROFILE[NPC_ARCHETYPE[k]] = "BIG_DOG" end
-ARCHETYPE_PROFILE[NPC_ARCHETYPE.BigDogGrenadier] = "WARHOUND_GRENADIER"
-ARCHETYPE_PROFILE[NPC_ARCHETYPE.BigDogMinigun]   = "WARHOUND_MINIGUN"
-ARCHETYPE_PROFILE[NPC_ARCHETYPE.MiniTank] = "MINITANK"
- 
-local LEGACY_BONE_NAMES = {
-    PLAYER_HUMANOID  = { head=8, chest=7, belly=4, root=2,
-                         l_shoulder=15, r_shoulder=45, l_arm=16, r_arm=46,
-                         l_hand=17, r_hand=47,
-                         l_knee=79, r_knee=87, l_heel=80, r_heel=88,
-                         l_toe=84, r_toe=92 },
-    NPC_HUMANOID     = { head=8, chest=6, belly=4, root=2,
-                         l_shoulder=14, r_shoulder=44, l_arm=15, r_arm=45,
-                         l_hand=17, r_hand=47,
-                         l_knee=78, r_knee=86, l_heel=79, r_heel=87,
-                         l_toe=83, r_toe=91 },
-    BIG_DOG            = { root=0, pelvis=2, chest=7, head=9, top=9 },
-    WARHOUND_GRENADIER = { root=0, pelvis=2, chest=7, head=9, top=9 },
-    WARHOUND_MINIGUN   = { root=0, pelvis=2, chest=7, head=9, top=9 },
-    MINITANK         = { head=31, chest=33, belly=33, root=0,
-                         l_top=31, r_top=35, l_front=1, r_front=16,
-                         middle=33, top=37 },
-    ITEM             = { root=0 },
-}
- 
 local ALL_BONE_IDS_SPARSE = {
     0, 1, 2, 4, 6, 7, 8, 9, 13, 14, 15, 16, 17, 18,
     22, 23, 25, 27, 28, 29, 30, 31, 32, 33, 34, 35,
@@ -729,6 +476,83 @@ local function profile_name_for(e)
     return "NPC_HUMANOID"
 end
  
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- ПОИСК УЯЗВИМОЙ ТОЧКИ (вызывается из aim_point_for)
+-- ═══════════════════════════════════════════════════════════════════════════
+
+local function get_weak_point(e)
+    if not e then return nil end
+
+    local pname = profile_name_for(e)
+    local bt = LEGACY_BONE_NAMES[pname] or LEGACY_BONE_NAMES.NPC_HUMANOID
+    local bones = e.bones
+
+    -- 1. Если враг почти мёртв (<15% HP) — всегда целимся в голову для добивания
+    if e.hp_max and e.hp_max > 0 and (e.hp or 0) / e.hp_max < 0.15 then
+        if bt.head and bones and bones[bt.head] then
+            return bones[bt.head]
+        end
+    end
+
+    -- 2. Проверяем специфичные уязвимые точки для боссов/техники
+    if e.archetype and WEAK_POINTS[e.archetype] then
+        local wp = WEAK_POINTS[e.archetype]
+        -- Пробуем все приоритетные кости
+        for _, bone_id in ipairs(wp.priority) do
+            if bones and bones[bone_id] then
+                return bones[bone_id]
+            end
+        end
+        -- Фолбэк: center -> сразу позиция; иначе head -> chest -> aim_bone профиля -> корень
+        if wp.fallback == "center" then
+            return e.pos
+        end
+        if wp.fallback == "head" and bt.head and bones and bones[bt.head] then
+            return bones[bt.head]
+        elseif wp.fallback == "chest" and bt.chest and bones and bones[bt.chest] then
+            return bones[bt.chest]
+        end
+        local prof = BONE_PROFILES[pname]
+        if prof and bones then
+            if prof.aim_bone and bones[prof.aim_bone] then return bones[prof.aim_bone] end
+            if prof.aim_bone_fallback and bones[prof.aim_bone_fallback] then
+                return bones[prof.aim_bone_fallback]
+            end
+        end
+        if bt.root and bones and bones[bt.root] then return bones[bt.root] end
+    end
+
+    -- 3. Для людей — по настройке (state.aim_part)
+    if pname == "NPC_HUMANOID" or pname == "PLAYER_HUMANOID" then
+        if state.aim_part == "head" and bt.head and bones and bones[bt.head] then
+            return bones[bt.head]
+        end
+        if state.aim_part == "chest" and bt.chest and bones and bones[bt.chest] then
+            return bones[bt.chest]
+        end
+        if state.aim_part == "pelvis" and bt.belly and bones and bones[bt.belly] then
+            return bones[bt.belly]
+        end
+        -- fallback: голова, затем корпус
+        if bt.head and bones and bones[bt.head] then return bones[bt.head] end
+        if bt.chest and bones and bones[bt.chest] then return bones[bt.chest] end
+    end
+
+    -- 4. Для техники без специфичных точек
+    if pname == "BIG_DOG" or pname == "WARHOUND_GRENADIER" or pname == "WARHOUND_MINIGUN" then
+        if bones and bones[9] then return bones[9] end  -- сенсор
+        if bones and bones[7] then return bones[7] end  -- корпус
+        if bones and bones[2] then return bones[2] end  -- корень
+    elseif pname == "MINITANK" then
+        if bones and bones[33] then return bones[33] end  -- ядро
+        if bones and bones[31] then return bones[31] end  -- сенсор
+        if bones and bones[0] then return bones[0] end    -- корень
+    end
+
+    -- 5. Финальный fallback — позиция энтити
+    return e.pos
+end
 local state
  
 local function get_color(e)
@@ -2333,48 +2157,6 @@ local function compute_box(e, m, w, sx_hint, sy_hint)
     return box_h, box_w, box_cx, box_cy
 end
  
-local function aim_point_for(e)
-    if not e then return nil end
- 
-    local pname = profile_name_for(e)
- 
-    if pname == "DRONE" or pname == "TURRET" or pname == "ITEM" then
-        return { e.pos[1], e.pos[2], e.pos[3] }
-    end
-    if pname == "NO_SKELETON" then
-        return { e.pos[1], e.pos[2], e.pos[3] }
-    end
- 
-    local prof = BONE_PROFILES[pname]
-    local bt = LEGACY_BONE_NAMES[pname] or LEGACY_BONE_NAMES.NPC_HUMANOID
- 
-    local target_bone
-    if prof and prof.is_humanoid then
-        if state.aim_part == "head"   then target_bone = bt.head   end
-        if state.aim_part == "chest"  then target_bone = bt.chest  end
-        if state.aim_part == "pelvis" then target_bone = bt.belly  end
-    elseif prof then
-        target_bone = prof.aim_bone
-    end
-    if target_bone == nil and prof then
-        target_bone = prof.aim_bone_fallback
-    end
-    if target_bone ~= nil and prof and prof.aim_bone_fallback ~= nil
-       and e.bones and not e.bones[target_bone] then
-        target_bone = prof.aim_bone_fallback
-    end
- 
-    if target_bone == nil then
-        target_bone = bt.root or 0
-    end
- 
-    local p = e.bones and e.bones[target_bone]
-    if not p then
-        local pos = e.pos
-        p = { pos[1], pos[2] + 1.2, pos[3] }
-    end
-    return p
-end
  
 local function normalize_window_rect(raw)
     if type(raw) ~= "table" then return nil end
@@ -2397,6 +2179,28 @@ local function normalize_window_rect(raw)
     return { rect }
 end
  
+ 
+
+-- Точка прицеливания: использует уязвимые точки (get_weak_point),
+-- но если возвращённая кость не читается в скелете цели — берёт
+-- запасную кость профиля (защита от «битых» костей).
+local function aim_point_for(e)
+    if not e then return nil end
+
+    local tp = get_weak_point(e)
+
+    -- Если кость не читается (пустой/битый скелет) — центр энтити
+    if type(tp) ~= "table" or tp[1] == nil then
+        local pos = e.pos
+        tp = { pos[1], pos[2], pos[3] }
+    end
+    return tp
+end
+
+-- ═══════════════════════════════════════════════════════════════════════════
+-- УЛУЧШЕННЫЙ ПОИСК ЦЕЛИ С ПРИОРИТИЗАЦИЕЙ
+-- ═══════════════════════════════════════════════════════════════════════════
+
 local function find_silent_target(entities, viewproj, wr)
     if not viewproj then return nil end
     wr = normalize_window_rect(wr)
@@ -2404,7 +2208,7 @@ local function find_silent_target(entities, viewproj, wr)
     local w = wr[1]
     if not w or not w.width or w.width <= 0 then return nil end
     local cx, cy = w.x + w.width / 2, w.y + w.height / 2
- 
+
     local best, best_score = nil, -math.huge
     for _, e in ipairs(entities) do
         if not e.is_player and is_silent_target(e) and e.dist <= state.silent_max_dist then
@@ -2416,7 +2220,27 @@ local function find_silent_target(entities, viewproj, wr)
                     local dist_px = math.sqrt(dx * dx + dy * dy)
                     if dist_px < state.silent_fov then
                         local prio = aimbot_priority(e)
-                        local score = prio * 10000 - dist_px
+
+                        -- Бонус за уязвимость (есть скелет/специфичная точка)
+                        local weak_bonus = 0
+                        if e.bones and next(e.bones) ~= nil then
+                            weak_bonus = 5000
+                        end
+
+                        -- Бонус за низкий HP (добивание)
+                        local hp_bonus = 0
+                        if e.hp_max and e.hp_max > 0 then
+                            local hp_ratio = (e.hp or 0) / e.hp_max
+                            if hp_ratio < 0.3 then hp_bonus = 3000 end
+                            if hp_ratio < 0.15 then hp_bonus = 6000 end
+                        end
+
+                        -- Бонус за боссов (приоритет)
+                        local boss_bonus = 0
+                        if e.tier == NPC_THREAT_TIER.Boss then boss_bonus = 8000 end
+                        if e.tier == NPC_THREAT_TIER.Heavy then boss_bonus = 4000 end
+
+                        local score = prio * 10000 - dist_px + weak_bonus + hp_bonus + boss_bonus
                         if score > best_score then
                             best_score = score
                             best = e
@@ -2428,7 +2252,7 @@ local function find_silent_target(entities, viewproj, wr)
     end
     return best
 end
- 
+
 local function pack_vec3(v)
     local out = {}
     for i = 1, 3 do
